@@ -1,0 +1,8 @@
+# Runtime dependencies — what the running app (and the Docker image) needs.
+# Kept deliberately small so the image builds fast even on a slow connection.
+fastapi>=0.115
+uvicorn>=0.30
+duckdb>=1.1
+pydantic>=2.7
+anthropic>=0.69
+python-dotenv>=1.0

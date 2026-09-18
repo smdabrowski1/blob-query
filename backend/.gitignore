@@ -1,0 +1,11 @@
+__pycache__/
+.venv/
+.venv-test/
+.env
+
+# Generated/fetched data — not source, regenerate locally via generate_data.py
+# / generate_polygons.py / fetch_uk_districts.py / fetch_msoa.py, then
+# tippecanoe for tiles/*.mbtiles. Keeps the repo code-only.
+data/*.parquet
+data/*.geojson
+tiles/*.mbtiles

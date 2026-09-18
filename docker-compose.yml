@@ -1,0 +1,18 @@
+services:
+  app:
+    build: .
+    image: parquet-query-engine
+    ports:
+      - "8000:8000"
+    volumes:
+      # Drop your own .parquet files into ./backend/data and hit ⟳ in the UI.
+      # This mount overrides the copy baked into the image.
+      - ./backend/data:/app/data
+    environment:
+      DATA_DIR: /app/data
+    # Read at container start, not baked into the image (see .dockerignore) —
+    # ANTHROPIC_API_KEY / ANTHROPIC_MODEL live here. File must exist; an empty
+    # backend/.env (feature just stays disabled) is fine.
+    env_file:
+      - ./backend/.env
+    restart: unless-stopped

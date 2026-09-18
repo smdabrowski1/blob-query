@@ -1,0 +1,10 @@
+# Keep secrets and local junk out of the build context entirely — nothing
+# here should ever end up baked into an image layer.
+backend/.env
+backend/.venv/
+backend/.venv-test/
+backend/__pycache__/
+backend/data/*.geojson
+frontend/node_modules/
+frontend/dist/
+.git/
