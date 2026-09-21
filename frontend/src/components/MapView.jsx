@@ -141,7 +141,16 @@ async function loadPolygonLayer(map, query, setSelectedFeature, highlightRef, is
   }
   if (isCancelled()) return;
 
-  map.setFilter("polygons-fill", ["in", ["get", "id"], ["literal", ids]]);
+  // Both layers need the filter — they're two separate layers over the same
+  // vector source (fill has no width-controllable border, so outline is its
+  // own layer), and a filter set on one doesn't apply to the other. Leaving
+  // "polygons-outline" unfiltered was exactly the bug where every polygon's
+  // border still drew regardless of the query, alongside the correctly
+  // filtered (and so invisible) fill — reading as "empty" outlined shapes
+  // for every excluded polygon rather than nothing at all.
+  const idFilter = ["in", ["get", "id"], ["literal", ids]];
+  map.setFilter("polygons-fill", idFilter);
+  map.setFilter("polygons-outline", idFilter);
 
   if (ids.length) {
     try {
@@ -201,7 +210,7 @@ export default function MapView({ query }) {
         source: "points",
         paint: {
           "circle-radius": ["interpolate", ["linear"], ["zoom"], 3, 2.5, 7, 4.5, 11, 8],
-          "circle-color": "#46b3a6",
+          "circle-color": "#0d9488",
           "circle-opacity": 0.7,
           "circle-stroke-color": "rgba(0,0,0,0.35)",
           "circle-stroke-width": 1,

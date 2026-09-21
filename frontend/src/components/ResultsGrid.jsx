@@ -5,31 +5,33 @@ import { runQuery, CHUNK } from "../api";
 
 const NUMERIC = /INT|DECIMAL|DOUBLE|FLOAT|REAL|NUMERIC|HUGEINT/i;
 
-// Dark theme tuned to match the app shell.
+// Light theme tuned to match the app shell. Selection/link accents use the
+// status teal rather than the brand coral (styles.css's --accent) — a data
+// grid's own selection outline is a different kind of "accent" than a CTA
+// button, and every selected cell edge being hot pink would be a lot.
 const gridTheme = {
-  accentColor: "#46b3a6",
-  accentLight: "rgba(70,179,166,0.14)",
-  textDark: "#d7dee8",
-  textMedium: "#aab3c0",
-  textLight: "#707a89",
-  textHeader: "#c3ccd8",
-  textHeaderSelected: "#ffffff",
-  bgCell: "#0e1116",
-  bgCellMedium: "#12171f",
-  bgHeader: "#151a21",
-  bgHeaderHovered: "#1b222b",
-  bgHeaderHasFocus: "#1b222b",
-  bgBubble: "#1b222b",
-  bgBubbleSelected: "#1b222b",
-  borderColor: "rgba(255,255,255,0.06)",
-  horizontalBorderColor: "rgba(255,255,255,0.04)",
-  drilldownBorder: "rgba(255,255,255,0.2)",
-  linkColor: "#5eb0ef",
+  accentColor: "#0d9488",
+  accentLight: "rgba(13,148,136,0.12)",
+  textDark: "#222222",
+  textMedium: "#6a6a6a",
+  textLight: "#adadad",
+  textHeader: "#404040",
+  textHeaderSelected: "#111111",
+  bgCell: "#ffffff",
+  bgCellMedium: "#fafafa",
+  bgHeader: "#f7f7f7",
+  bgHeaderHovered: "#eeeeee",
+  bgHeaderHasFocus: "#eeeeee",
+  bgBubble: "#f7f7f7",
+  bgBubbleSelected: "#eeeeee",
+  borderColor: "rgba(0,0,0,0.08)",
+  horizontalBorderColor: "rgba(0,0,0,0.06)",
+  drilldownBorder: "rgba(0,0,0,0.15)",
+  linkColor: "#2563eb",
   cellHorizontalPadding: 10,
   headerFontStyle: "600 13px",
   baseFontStyle: "13px",
-  fontFamily:
-    "ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace",
+  fontFamily: "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
 };
 
 // Measure a container so the grid canvas gets exact pixel dimensions.
@@ -123,7 +125,7 @@ export default function ResultsGrid({ query }) {
         allowOverlay: true,
         readonly: true,
         contentAlign: numeric ? "right" : "left",
-        themeOverride: isNull ? { textDark: "#5b6472" } : undefined,
+        themeOverride: isNull ? { textDark: "#adadad" } : undefined,
       };
     },
     [version, query.columns] // eslint-disable-line react-hooks/exhaustive-deps

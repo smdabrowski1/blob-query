@@ -1,21 +1,48 @@
 :root {
-  --bg: #0e1116;
-  --panel: #151a21;
-  --panel-2: #1b222b;
-  --border: #232b36;
-  --text: #d7dee8;
-  --dim: #8a93a2;
-  --faint: #5b6472;
-  --accent: #46b3a6;
-  --accent-weak: rgba(70, 179, 166, 0.14);
-  --danger: #e5786d;
-  --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
-  --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  /* Light, airy neutrals — a soft off-white for chrome (sidebar, toolbars,
+     statusbars) and pure white for the two "working surfaces" (the SQL
+     editor, the map/grid canvas), the same layering relationship the old
+     dark theme used (--panel lighter than --bg there; here it's the
+     reverse, --panel one shade *off* pure white) so nothing but the
+     palette itself had to change structurally. */
+  --bg: #ffffff;
+  --panel: #f7f7f7;
+  --panel-2: #eeeeee;
+  --border: #e3e3e3;
+  --text: #222222;
+  --dim: #6a6a6a;
+  --faint: #adadad;
 
-  /* Radius scale — folding ad hoc one-off values (4/7px etc.) onto this. */
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 14px;
+  /* Brand/interactive — Airbnb's "Rausch" coral, used only for things you
+     click or that mark active selection (Run, active tab, hover states).
+     Status colors are deliberately a separate hue family below so "this is
+     the brand" and "this succeeded" never collide. */
+  --accent: #ff385c;
+  --accent-weak: rgba(255, 56, 92, 0.1);
+
+  /* Status colors — independent of --accent on purpose (see above). */
+  --success: #0d9488;
+  --success-weak: rgba(13, 148, 136, 0.1);
+  --danger: #d92d20;
+  --danger-weak: rgba(217, 45, 32, 0.08);
+
+  --ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Radius scale, tuned rounder — Airbnb's UI leans on noticeably larger
+     radii than the old dark theme's fairly tight 6/8/14. --radius-pill
+     formalizes the 999px value several components already reached for. */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-pill: 999px;
+
+  /* Soft, layered shadows replace the old theme's harder dark-on-dark
+     ones — a light surface needs much lower shadow opacity to read as
+     "elevated" rather than "smudged". */
+  --shadow-sm: 0 1px 2px rgba(20, 20, 20, 0.06);
+  --shadow-md: 0 8px 24px rgba(20, 20, 20, 0.1);
+  --shadow-lg: 0 24px 60px rgba(20, 20, 20, 0.16);
 
   /* Shared easing: fast linear-ish decel for hover/press feedback, and a
      critically-damped-spring approximation (no JS spring lib — this is a
@@ -68,7 +95,7 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
-.brand { font-weight: 600; letter-spacing: -0.01em; }
+.brand { font-weight: 700; letter-spacing: -0.01em; }
 .brand-dot { color: var(--accent); padding: 0 1px; }
 
 .icon-btn {
@@ -89,6 +116,9 @@ body {
   padding: 12px 14px 6px;
   color: var(--faint);
   font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .tree { flex: 1; overflow: auto; padding: 0 6px 8px; }
@@ -196,10 +226,10 @@ body {
   min-width: 230px;
   max-height: 220px;
   overflow-y: auto;
-  background: var(--panel-2);
+  background: #ffffff;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-md);
   padding: 4px;
 }
 .version-empty { color: var(--faint); font-size: 11.5px; padding: 8px 10px; }
@@ -219,7 +249,7 @@ body {
 }
 .version-row:hover:not(:disabled) { background: var(--panel); }
 .version-row:disabled { cursor: default; }
-.version-row.current { color: var(--accent); }
+.version-row.current { color: var(--success); }
 .version-check { width: 14px; flex: 0 0 auto; }
 .version-ts { flex: 1; font-family: var(--mono); text-align: left; overflow: hidden; text-overflow: ellipsis; }
 .version-rows { color: var(--faint); font-variant-numeric: tabular-nums; }
@@ -265,18 +295,19 @@ body {
 
 .run-btn {
   background: var(--accent);
-  color: #06201d;
+  color: #ffffff;
   border: none;
   font-weight: 600;
   font-size: 13px;
-  padding: 6px 16px;
-  border-radius: var(--radius-sm);
+  padding: 7px 18px;
+  border-radius: var(--radius-pill);
   cursor: pointer;
-  transition: filter 0.12s var(--ease-out), transform 0.1s var(--ease-out);
+  box-shadow: var(--shadow-sm);
+  transition: filter 0.12s var(--ease-out), transform 0.1s var(--ease-out), box-shadow 0.12s var(--ease-out);
 }
-.run-btn:hover { filter: brightness(1.07); }
+.run-btn:hover { filter: brightness(1.05); box-shadow: var(--shadow-md); }
 .run-btn:active:not(:disabled) { transform: scale(0.97); }
-.run-btn:disabled { opacity: 0.6; cursor: default; }
+.run-btn:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
 
 .kbd { color: var(--faint); font-size: 11.5px; font-family: var(--mono); }
 
@@ -328,8 +359,8 @@ body {
 .error-banner {
   margin: 14px;
   padding: 12px 14px;
-  border: 1px solid rgba(229, 120, 109, 0.4);
-  background: rgba(229, 120, 109, 0.08);
+  border: 1px solid rgba(217, 45, 32, 0.25);
+  background: var(--danger-weak);
   color: var(--danger);
   border-radius: var(--radius-md);
   font-family: var(--mono);
@@ -353,8 +384,8 @@ body {
 .statusbar .sep { color: var(--dim); }
 
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
-.dot.running { background: #e0b341; }
-.dot.ok { background: var(--accent); }
+.dot.running { background: #d69e2e; }
+.dot.ok { background: var(--success); }
 .dot.error { background: var(--danger); }
 .dot.idle { background: var(--faint); }
 
@@ -391,9 +422,9 @@ body {
   display: flex;
   gap: 2px;
   padding: 2px;
-  background: var(--bg);
+  background: var(--panel-2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-pill);
 }
 .seg-btn {
   background: none;
@@ -402,14 +433,14 @@ body {
   font-family: var(--ui);
   font-size: 11.5px;
   font-weight: 500;
-  padding: 4px 10px;
-  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
   cursor: pointer;
   transition: background 0.15s var(--ease-out), color 0.15s var(--ease-out), transform 0.1s var(--ease-out);
 }
 .seg-btn:hover { color: var(--text); }
 .seg-btn:active { transform: scale(0.95); }
-.seg-btn.active { background: var(--panel-2); color: var(--text); }
+.seg-btn.active { background: #ffffff; color: var(--text); box-shadow: var(--shadow-sm); }
 
 .view-layer { position: absolute; inset: 0; }
 
@@ -417,9 +448,10 @@ body {
 .mapview { position: absolute; inset: 0; }
 .map-container { position: absolute; inset: 0; }
 
-/* MapLibre chrome tuned to the dark theme */
+/* MapLibre chrome tuned to the light theme (CARTO Positron is light too, so
+   this now matches the basemap instead of fighting it). */
 .maplibregl-ctrl-scale {
-  background: rgba(11, 14, 19, 0.6);
+  background: rgba(255, 255, 255, 0.75);
   border-color: var(--faint);
   color: var(--dim);
 }
@@ -436,12 +468,12 @@ body {
   bottom: 12px;
   width: 300px;
   max-width: calc(100% - 62px);
-  background: rgba(21, 26, 33, 0.88);
+  background: rgba(255, 255, 255, 0.86);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-lg);
   z-index: 3;
   display: flex;
   flex-direction: column;
@@ -480,7 +512,7 @@ body {
   justify-content: space-between;
   gap: 14px;
   padding: 7px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   font-size: 12.5px;
   line-height: 1.5;
 }
@@ -521,7 +553,7 @@ body {
 .refresh-modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(6, 8, 11, 0.45);
+  background: rgba(30, 30, 30, 0.32);
   backdrop-filter: blur(3px);
   -webkit-backdrop-filter: blur(3px);
   display: flex;
@@ -535,10 +567,10 @@ body {
 .refresh-modal {
   width: 340px;
   max-width: calc(100% - 32px);
-  background: var(--panel);
+  background: #ffffff;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--shadow-lg);
   padding: 16px 18px 18px;
   transform-origin: center;
   /* Never animate in from scale(0) — nothing in reality appears from
@@ -584,7 +616,10 @@ body {
   transition: width 0.3s var(--ease-out);
 }
 .refresh-modal-bar-fill.failed { background: var(--danger); }
-.refresh-modal-bar-fill.active { background: var(--accent); }
+/* A completed bar goes to --success (a distinct green/teal), not the brand
+   coral it was running as — "in progress" and "done" reading as different
+   colors is worth more here than reusing one accent throughout. */
+.refresh-modal-bar-fill.active { background: var(--success); }
 /* Before the first real progress number arrives (or during the brief
    "validating" step, which has none), a static full-width bar reads as
    already finished — actively misleading for a job that's still running.
@@ -614,7 +649,7 @@ body {
 .refresh-modal-success {
   margin-top: 12px;
   font-size: 12.5px;
-  color: var(--accent);
+  color: var(--success);
 }
 .refresh-modal-actions {
   margin-top: 14px;
@@ -627,7 +662,7 @@ body {
   color: var(--text);
   font-size: 12.5px;
   padding: 6px 14px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-pill);
   cursor: pointer;
   transition: background 0.12s var(--ease-out), transform 0.1s var(--ease-out);
 }
@@ -653,7 +688,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: rgba(21, 26, 33, 0.92);
+  background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--border);
@@ -662,7 +697,7 @@ body {
   font-size: 12px;
   color: var(--text);
   cursor: pointer;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-md);
   transition: transform 0.1s var(--ease-out), background 0.12s var(--ease-out);
   animation: refresh-pill-in 0.2s var(--ease-spring);
 }
@@ -670,12 +705,12 @@ body {
   from { transform: translateY(6px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
 }
-.refresh-pill:hover { background: rgba(27, 34, 43, 0.96); }
+.refresh-pill:hover { background: rgba(255, 255, 255, 0.98); }
 .refresh-pill:active { transform: scale(0.97); }
 .refresh-pill-name { font-family: var(--mono); color: var(--dim); }
 .refresh-pill-phase { color: var(--text); }
 .refresh-pill.failed .refresh-pill-phase { color: var(--danger); }
-.refresh-pill.active .refresh-pill-phase { color: var(--accent); }
+.refresh-pill.active .refresh-pill-phase { color: var(--success); }
 
 @media (prefers-reduced-motion: reduce) {
   .refresh-modal-backdrop { animation: none; }
