@@ -3,9 +3,14 @@ __pycache__/
 .venv-test/
 .env
 
-# Generated/fetched data — not source, regenerate locally via generate_data.py
-# / generate_polygons.py / fetch_uk_districts.py / fetch_msoa.py, then
-# tippecanoe for tiles/*.mbtiles. Keeps the repo code-only.
+# Generated/fetched data — not source, regenerate locally by hitting the
+# refresh API (see refresh.py / registry.py) rather than committing outputs.
+# Keeps the repo code-only. Versioned layout is data/<name>/<version>.parquet
+# and tiles/<name>/<version>.mbtiles now (registry.py + db.py), not the old
+# flat data/*.parquet — ignore the whole per-dataset subtree either way.
 data/*.parquet
 data/*.geojson
+data/*/
 tiles/*.mbtiles
+tiles/*/
+registry.db

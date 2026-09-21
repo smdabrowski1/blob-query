@@ -1,9 +1,6 @@
-# Everything in the runtime image, plus the libraries generate_data.py and
-# fetch_uk_districts.py need. Install locally (uv pip install -r
-# requirements-dev.txt) when you want to create or regenerate sample parquet.
-# Not installed in the Docker image.
+# Everything in the runtime image (which now includes numpy/pyarrow/requests
+# — see requirements.txt), plus polars for ad hoc local exploration of the
+# generated parquet. Install locally (uv pip install -r requirements-dev.txt)
+# for CLI-style `python generate_data.py`/etc. runs outside the app.
 -r requirements.txt
-numpy>=1.26
-pyarrow>=17
 polars>=1.0
-requests>=2.31

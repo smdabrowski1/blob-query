@@ -1,14 +1,28 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Sidebar from "./components/Sidebar.jsx";
 import QueryEditor from "./components/QueryEditor.jsx";
 import ResultsGrid from "./components/ResultsGrid.jsx";
 import MapView from "./components/MapView.jsx";
-import { getDatasets, getHealth, refreshDatasets, runQuery, CHUNK } from "./api";
+import RefreshModal from "./components/RefreshModal.jsx";
+import {
+  getDatasets,
+  getHealth,
+  refreshDatasets,
+  refreshDataset,
+  getRefreshStatus,
+  getRefreshJobs,
+  runQuery,
+  CHUNK,
+} from "./api";
 
 const DEFAULT_SQL = `SELECT region, category, revenue, lat, lon
 FROM sales_events
 WHERE revenue > 500
 LIMIT 5000;`;
+
+// A job legitimately in flight lives in this state — anything else (idle,
+// active, failed) is terminal and stops polling.
+const RUNNING_STATUSES = new Set(["fetching", "validating", "tiling"]);
 
 export default function App() {
   const [datasets, setDatasets] = useState([]);
@@ -22,6 +36,103 @@ export default function App() {
   const [viewMode, setViewMode] = useState("query"); // query | full
   const [fullDatasetResult, setFullDatasetResult] = useState(null);
   const [fullDatasetLoading, setFullDatasetLoading] = useState(false);
+
+  // Refresh-job tracking lives here, not per-Sidebar-row, so a job's progress
+  // modal can be minimized/reopened independent of the row that started it,
+  // and survives a page reload (the job itself runs server-side — see
+  // getRefreshJobs() below, which rediscovers anything still in flight).
+  const [refreshJobs, setRefreshJobs] = useState({});
+  const pollRefs = useRef({});
+
+  const stopPollingJob = useCallback((name) => {
+    if (pollRefs.current[name]) {
+      clearInterval(pollRefs.current[name]);
+      delete pollRefs.current[name];
+    }
+  }, []);
+
+  const pollJob = useCallback(
+    async (name) => {
+      try {
+        const s = await getRefreshStatus(name);
+        setRefreshJobs((jobs) => {
+          if (!(name in jobs)) return jobs; // dismissed while this request was in flight
+          return { ...jobs, [name]: { ...jobs[name], ...s } };
+        });
+        if (!RUNNING_STATUSES.has(s.status)) {
+          stopPollingJob(name);
+          if (s.status === "active") loadDatasets();
+        }
+      } catch {
+        stopPollingJob(name);
+      }
+    },
+    [stopPollingJob] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  const startPollingJob = useCallback(
+    (name) => {
+      stopPollingJob(name);
+      pollRefs.current[name] = setInterval(() => pollJob(name), 2000);
+    },
+    [pollJob, stopPollingJob]
+  );
+
+  const startRefresh = useCallback(
+    async (name) => {
+      try {
+        await refreshDataset(name);
+        setRefreshJobs((jobs) => ({
+          ...jobs,
+          [name]: { status: "fetching", minimized: false },
+        }));
+        startPollingJob(name);
+      } catch (err) {
+        setRefreshJobs((jobs) => ({
+          ...jobs,
+          [name]: { status: "failed", error: String(err.message || err), minimized: false },
+        }));
+      }
+    },
+    [startPollingJob]
+  );
+
+  const minimizeJob = useCallback((name) => {
+    setRefreshJobs((jobs) => (name in jobs ? { ...jobs, [name]: { ...jobs[name], minimized: true } } : jobs));
+  }, []);
+
+  const reopenJob = useCallback((name) => {
+    setRefreshJobs((jobs) => (name in jobs ? { ...jobs, [name]: { ...jobs[name], minimized: false } } : jobs));
+  }, []);
+
+  const dismissJob = useCallback(
+    (name) => {
+      stopPollingJob(name);
+      setRefreshJobs((jobs) => {
+        const { [name]: _drop, ...rest } = jobs;
+        return rest;
+      });
+    },
+    [stopPollingJob]
+  );
+
+  // Discover jobs already running on the server (survives a page reload or
+  // the app having crashed mid-job) — start them minimized, since a job the
+  // user didn't just click shouldn't pop an intrusive modal on every load.
+  useEffect(() => {
+    getRefreshJobs()
+      .then((jobs) => {
+        for (const j of jobs) {
+          setRefreshJobs((prev) => ({ ...prev, [j.name]: { ...j, minimized: true } }));
+          startPollingJob(j.name);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      Object.keys(pollRefs.current).forEach((name) => clearInterval(pollRefs.current[name]));
+      pollRefs.current = {};
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadDatasets = useCallback(async () => {
     try {
@@ -75,18 +186,11 @@ export default function App() {
 
   const openDataset = useCallback(
     (name) => {
-      // A small preview LIMIT is fine for the table view, but it starves the
-      // polygon map: land_parcels tiles a packed tessellation, and a 1000-row
-      // (2%) slice of it leaves visible gaps almost everywhere. Tiled
-      // datasets get a limit that comfortably covers the whole tileset
-      // instead (still capped, just not at table-preview size).
-      const hasTiles = datasets.find((d) => d.name === name)?.hasTiles;
-      const limit = hasTiles ? 50000 : 1000;
-      const text = `SELECT *\nFROM ${name}\nLIMIT ${limit};`;
+      const text = `SELECT *\nFROM ${name}\nLIMIT 1000;`;
       setSql(text);
       execute(text);
     },
-    [execute, datasets]
+    [execute]
   );
 
   const loadFullDataset = useCallback(async () => {
@@ -139,6 +243,16 @@ export default function App() {
         onOpenDataset={openDataset}
         onInsertColumn={insertColumn}
         onRefresh={refresh}
+        refreshJobs={refreshJobs}
+        onStartRefresh={startRefresh}
+        onReopenRefresh={reopenJob}
+      />
+
+      <RefreshModal
+        jobs={refreshJobs}
+        onMinimize={minimizeJob}
+        onReopen={reopenJob}
+        onDismiss={dismissJob}
       />
 
       <div className="main">
@@ -232,9 +346,6 @@ export default function App() {
               <span className="sep">· {displayQuery.total?.toLocaleString()} rows</span>
             )}
             {elapsed != null && status !== "error" && <span className="sep">· {elapsed} ms</span>}
-            {hasGeometry && status !== "error" && (
-              <span className="sep">· geometry detected</span>
-            )}
           </div>
         </div>
       </div>

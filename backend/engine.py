@@ -25,6 +25,9 @@ from typing import Any
 
 import duckdb
 
+import db as registry_db
+from registry import DATASETS as DATASET_CONFIG
+
 
 def _sanitize(name: str) -> str:
     """Turn a filename stem into a safe SQL identifier."""
@@ -101,9 +104,15 @@ def _detect_polygon_source(sql: str, columns: list[dict], tiled_names: set[str])
 
 
 class QueryEngine:
-    def __init__(self, data_dir: str | Path, tiles_dir: str | Path | None = None):
+    def __init__(
+        self,
+        data_dir: str | Path,
+        tiles_dir: str | Path | None = None,
+        registry_db_path: str | Path | None = None,
+    ):
         self.data_dir = Path(data_dir)
         self.tiles_dir = Path(tiles_dir) if tiles_dir else None
+        self.registry_db_path = Path(registry_db_path) if registry_db_path else Path(__file__).parent / "registry.db"
         self.con = duckdb.connect(database=":memory:")
         # Handy defaults; httpfs/azure loaded lazily only if a remote path is used.
         self.con.execute("SET enable_progress_bar = false;")
@@ -120,47 +129,64 @@ class QueryEngine:
         except Exception as e:
             print(f"Spatial extension unavailable ({e}) — ST_* functions won't work until this can install.")
         self._views: dict[str, Path] = {}
+        self._mbtiles: dict[str, Path] = {}
         self._tile_zoom_cache: dict[str, tuple[int, int]] = {}
         self.refresh()
 
     # ---- dataset registration -------------------------------------------------
     def refresh(self) -> None:
-        """(Re)register every parquet file in the data dir as a view."""
+        """(Re)register the *current* version of every dataset in the
+        registry (registry.py's static config + registry.db's per-version
+        metadata) as a DuckDB view. A dataset with no active version yet
+        (never fetched/generated) is simply absent, same as a missing flat
+        file used to be before versioning existed."""
         cur = self.con.cursor()
         self._views.clear()
-        if not self.data_dir.exists():
-            return
-        for path in sorted(self.data_dir.glob("*.parquet")):
-            view = _sanitize(path.stem)
-            # de-dupe if two files sanitise to the same name
-            base, i = view, 2
-            while view in self._views:
-                view = f"{base}_{i}"
-                i += 1
-            safe_path = str(path).replace("'", "''")
-            cur.execute(
-                f'CREATE OR REPLACE VIEW "{view}" AS '
-                f"SELECT * FROM read_parquet('{safe_path}')"
-            )
-            self._views[view] = path
+        self._mbtiles.clear()
+        self._tile_zoom_cache.clear()
+
+        con = registry_db.connect(self.registry_db_path)
+        try:
+            for name in DATASET_CONFIG:
+                row = registry_db.get_current(con, name)
+                if row is None or not row["parquet_path"]:
+                    continue
+                parquet_path = Path(row["parquet_path"])
+                if not parquet_path.is_file():
+                    continue
+                view = _sanitize(name)
+                safe_path = str(parquet_path).replace("'", "''")
+                cur.execute(
+                    f'CREATE OR REPLACE VIEW "{view}" AS '
+                    f"SELECT * FROM read_parquet('{safe_path}')"
+                )
+                self._views[view] = parquet_path
+                if row["mbtiles_path"] and Path(row["mbtiles_path"]).is_file():
+                    self._mbtiles[view] = Path(row["mbtiles_path"])
+        finally:
+            con.close()
 
     def _has_tiles(self, view: str) -> bool:
-        return bool(self.tiles_dir) and (self.tiles_dir / f"{view}.mbtiles").is_file()
+        return view in self._mbtiles
+
+    def mbtiles_path(self, view: str) -> Path | None:
+        return self._mbtiles.get(view)
 
     def tiled_dataset_names(self) -> set[str]:
-        return {view for view in self._views if self._has_tiles(view)}
+        return set(self._mbtiles.keys())
 
     def tile_zoom_range(self, view: str) -> tuple[int, int] | None:
-        """(minzoom, maxzoom) actually present in <view>.mbtiles, from its
-        metadata table — tippecanoe's -zg picks these automatically per run,
-        so the frontend must ask rather than assume a fixed value; otherwise
-        it'll request zooms beyond what's tiled and get 404s instead of
-        MapLibre's normal overzoom-from-maxzoom behaviour."""
+        """(minzoom, maxzoom) actually present in the current version's
+        .mbtiles, from its metadata table — tippecanoe's -zg picks these
+        automatically per run, so this must be read rather than assumed;
+        otherwise the frontend would request zooms beyond what's tiled and
+        get 404s instead of MapLibre's normal overzoom-from-maxzoom behaviour."""
         if view in self._tile_zoom_cache:
             return self._tile_zoom_cache[view]
-        if not self._has_tiles(view):
+        mbtiles = self._mbtiles.get(view)
+        if mbtiles is None:
             return None
-        con = sqlite3.connect(str(self.tiles_dir / f"{view}.mbtiles"))
+        con = sqlite3.connect(str(mbtiles))
         try:
             rows = dict(
                 con.execute(

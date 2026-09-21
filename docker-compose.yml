@@ -6,10 +6,20 @@ services:
       - "8000:8000"
     volumes:
       # Drop your own .parquet files into ./backend/data and hit ⟳ in the UI.
-      # This mount overrides the copy baked into the image.
+      # This mount overrides the copy baked into the image. tiles/ and
+      # registry.db need the same treatment: without them, a refresh
+      # triggered from the running app writes tiles and the version pointer
+      # into the container's own filesystem (whatever was baked in at build
+      # time), invisible on the host and gone on the next `docker compose
+      # up --build` — the parquet would persist (data/ is mounted) but end
+      # up orphaned, with no registry row pointing at it.
       - ./backend/data:/app/data
+      - ./backend/tiles:/app/tiles
+      - ./backend/registry.db:/app/registry.db
     environment:
       DATA_DIR: /app/data
+      TILES_DIR: /app/tiles
+      REGISTRY_DB: /app/registry.db
     # Read at container start, not baked into the image (see .dockerignore) —
     # ANTHROPIC_API_KEY / ANTHROPIC_MODEL live here. File must exist; an empty
     # backend/.env (feature just stays disabled) is fine.

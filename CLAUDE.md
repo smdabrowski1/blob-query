@@ -10,18 +10,28 @@ in a windowed grid that scrolls millions of rows without loading them all.
 
 ## Layout
 
-- `backend/engine.py` — `QueryEngine`: registers each parquet in `backend/data/`
-  as a DuckDB **view** named after the file stem; runs paginated queries.
+- `backend/registry.py` — static config: one entry per dataset (`kind`,
+  fetch/generate params). `backend/db.py` — SQLite-backed *version* registry
+  (`registry.db`): which version of each dataset is current, its status,
+  row count, file paths. `backend/refresh.py` — orchestrator that actually
+  fetches/generates + tiles a dataset and lands a new version. See "Dataset
+  refresh & versioning" below — this replaced a flat-file-per-dataset,
+  hand-run-script model.
+- `backend/engine.py` — `QueryEngine`: registers the **current version** of
+  each dataset (per `registry.db`) as a DuckDB **view** named after the
+  dataset; runs paginated queries.
 - `backend/main.py` — FastAPI app: `/api/datasets`, `/api/datasets/refresh`,
-  `/api/query`, `/api/nl-query`, `/api/health`, `/tiles/{name}/{z}/{x}/{y}.pbf`.
-  CORS is open to the Vite dev origin only.
-- `backend/generate_data.py` — generates generic test parquet files.
-- `backend/generate_polygons.py` — generates the `land_parcels` polygon dataset
-  (parquet + a `.geojson` build intermediate for tippecanoe). See "Polygon
-  tiles" below.
-- `backend/fetch_uk_districts.py` — pulls the real `uk_districts` boundary
-  dataset from an ONS/OS ArcGIS FeatureServer (parquet + `.geojson`, same
-  tippecanoe flow). See "Polygon tiles" below.
+  `/api/datasets/{name}/refresh` + `/refresh-status` + `/versions` +
+  `/activate`, `/api/query`, `/api/nl-query`, `/api/health`,
+  `/tiles/{name}/{z}/{x}/{y}.pbf`. CORS is open to the Vite dev origin only.
+- `backend/generate_data.py` — generates the two generic tabular datasets
+  (`sales_events`, `inventory_snapshot`).
+- `backend/generate_polygons.py` — generates the `land_parcels` polygon
+  dataset (parquet + a `.geojson` build intermediate for tippecanoe).
+- `backend/sources/arcgis.py` — generic ArcGIS FeatureServer fetcher (paginate,
+  retry, optionally concurrent, WKT-encode) driven entirely by a
+  `registry.py` entry; `uk_districts` and `msoa` are both just config against
+  this one module, not separate scripts.
 - `frontend/src/api.js` — fetch client. Exports `CHUNK` (rows per scroll window).
 - `frontend/src/components/ResultsGrid.jsx` — Glide grid + lazy chunk cache.
 - `frontend/src/components/MapView.jsx` — MapLibre map; renders either a
@@ -47,11 +57,15 @@ cd frontend && npm install && npm run dev    # http://localhost:5173
 ```
 
 Backend must be on :8000 for the frontend's default `VITE_API_BASE`.
-`DATA_DIR` env var overrides the parquet folder read by `backend/engine.py`;
-`TILES_DIR` (default `backend/tiles/`) overrides where `.mbtiles` are read from.
+`DATA_DIR`/`TILES_DIR`/`REGISTRY_DB` env vars override where `backend/engine.py`
+reads parquet/`.mbtiles`/the version registry from (defaults: `backend/data/`,
+`backend/tiles/`, `backend/registry.db`).
 
-Regenerate sample parquet with `python generate_data.py --rows N [--name X --seed S]`
-(needs `requirements-dev.txt`, which adds numpy/pyarrow/polars — not in the runtime image).
+Datasets are refreshed from the running app now (see "Dataset refresh &
+versioning" below) — `generate_data.py`/`generate_polygons.py`/ArcGIS fetches
+are what that runs under the hood, not something to invoke by hand day-to-day.
+`requirements-dev.txt` only adds `polars` on top of the runtime image now
+(numpy/pyarrow/requests are runtime deps — the refresh API needs them too).
 
 Docker builds the frontend and serves it from FastAPI on one port (no CORS):
 `docker compose up --build` → http://localhost:8000. `./backend/data` is bind-mounted
@@ -89,67 +103,108 @@ build context via `.dockerignore` (never baked into an image layer). In Docker,
 container instead — the file must exist, but an empty one is fine (feature just
 stays disabled).
 
-### Polygon tiles
+### Dataset refresh & versioning
 
-`land_parcels` is a second sample dataset (~50k polygons) rendered as MapLibre
-vector tiles instead of the point/circle path. Regenerating it is a two-command,
-dev-only flow (not part of `uvicorn`/Docker):
+Every dataset (`sales_events`, `inventory_snapshot`, `land_parcels`,
+`uk_districts`, `msoa`) can be refreshed **from the running app** — a real
+re-fetch/re-generate (+ re-tile for polygon datasets), not just a rescan of
+what's already on disk. Click the ⟳ next to a dataset in the sidebar, or
+`POST /api/datasets/{name}/refresh`. This runs as a background thread (jobs
+can take minutes — MSOA's fetch alone is a few minutes, plus tiling) so the
+UI polls `GET /api/datasets/{name}/refresh-status` (`fetching` →
+`validating`/`tiling` → `active`/`failed`) rather than blocking a request.
 
-```bash
-cd backend
-python generate_polygons.py                 # -> data/land_parcels.parquet + .geojson
-tippecanoe -o tiles/land_parcels.mbtiles -zg --extend-zooms-if-still-dropping \
-    -l land_parcels -f data/land_parcels.geojson
-```
+**Versioned, not merged.** These are reference snapshots (administrative
+boundaries, census geographies), not transactional data — there's no real
+delta API to upsert from, so a refresh always pulls a complete fresh copy.
+Old versions aren't deleted: `GET /api/datasets/{name}/versions` lists them,
+and `POST /api/datasets/{name}/activate {"version": "..."}` (also in the
+sidebar's 🕘 dropdown) switches which one is queried, independent of which
+is newest.
 
-`tippecanoe` (install via `brew install tippecanoe` or build from source) is a
-local/dev-time tool only — it is **not** installed in the Docker image, the same
-way `requirements-dev.txt`'s numpy/pyarrow/polars aren't. `tiles/*.mbtiles` is
-committed as a build artifact, like the sample `.parquet` files, so a fresh
-clone or `docker compose up` works with no local tippecanoe install.
+**Storage: files on disk, a small SQLite registry for metadata.**
+`backend/data/<name>/<version>.parquet` (+ `backend/tiles/<name>/<version>.mbtiles`
+for polygon datasets) — big blobs stay files, a database is the wrong place
+for those. `backend/registry.db` (via `backend/db.py`, stdlib `sqlite3` —
+already a dependency here, same as reading `.mbtiles`) tracks which version
+is current, status, row count, and file paths in one `dataset_versions`
+table. Flipping "current" is a single SQL transaction (old version →
+`superseded`, new version → `is_current=1, status='active'`), not a
+hand-rolled file-pointer dance — a bare "current version" text file edited
+in place isn't crash-safe (a power cut mid-write leaves it truncated); a
+transaction's rollback-on-failure guarantee is.
 
-`uk_districts` is a third tiled dataset — real UK Local Authority District
-boundaries (361 districts, Dec 2025, full BFE resolution) pulled once from the
-ONS/OS ArcGIS FeatureServer, not fetched live per-request. Contains both
-Ordnance Survey and ONS Intellectual Property Rights. Same two-command flow:
+**The actual data files still need write-to-temp-then-validate-then-rename**
+(`backend/refresh.py`) — a database transaction can't retroactively make a
+half-downloaded 90MB parquet file valid, that's a separate, file-level
+concern. `run_refresh()`: writes to `.tmp-<version>.parquet`/`.mbtiles`,
+validates (parquet opens and has rows; for polygon kinds, the ArcGIS fetch's
+total count matches what `returnCountOnly` reported, and the `.mbtiles` has
+a non-empty `tiles` table), *then* `os.replace()`s into the final `<version>.*`
+name, *then* runs the registry transaction. A refresh that fails or is
+interrupted at any point before that last step never touches what's
+currently being served — the previous version's row stays `is_current=1`
+throughout. A job's row starts in `status='fetching'` before any file I/O,
+so "is a refresh already running" is a DB query
+(`reap_stale_jobs`/`has_running_job` in `db.py`), not a separate in-memory
+structure that forgets everything on restart — though this means a
+container crash mid-job leaves that dataset's refresh **locked out for up to
+`STALE_AFTER_MINUTES` (60)** before a retry is allowed, since a young
+non-terminal row can't be distinguished from a genuinely-still-running job
+without a time threshold. A known, accepted tradeoff, not a bug — lower it
+if 60 minutes turns out to be impractical in practice.
 
-```bash
-cd backend
-python fetch_uk_districts.py                # -> data/uk_districts.parquet + .geojson
-tippecanoe -o tiles/uk_districts.mbtiles -zg --extend-zooms-if-still-dropping \
-    -l uk_districts -f data/uk_districts.geojson
-```
+**One generic fetcher per *kind* of source, not one script per dataset.**
+`backend/sources/arcgis.py` is the ArcGIS FeatureServer fetcher (paginate,
+retry with backoff, optionally concurrent, WKT-encode Polygon/MultiPolygon) —
+both `uk_districts` and `msoa` are just `backend/registry.py` config against
+this one module (URL, page size, concurrency, field mapping — see that
+file's entries), not separate near-duplicate scripts the way
+`fetch_uk_districts.py`/`fetch_msoa.py` used to be (deleted). `id` is always
+a synthetic sequential integer, never the real source code (`lad_code`/
+`msoa_code` are separate columns) — `MapView.jsx`'s bounds query builds a
+bare `IN (${ids.join(",")})` SQL list, which only works unquoted for numeric
+ids. Page size/concurrency are tuned **per ArcGIS endpoint, empirically** —
+uk_districts needed 25/page sequential, msoa tolerated 150/page with 5
+concurrent workers (I/O-bound waiting on the server, not CPU-bound — threads,
+not multiprocessing). A FeatureServer's `maxRecordCount` is a record-count
+cap, not a payload-size one; full-BFE-resolution geometry can hit the
+server's own request timeout well under that cap. Don't assume a page size
+transfers to a new endpoint without testing it first.
+`generate_data.py`/`generate_polygons.py` (the two `generated_*` kinds) stay
+as their own functions — genuinely different algorithms, not the same logic
+with different parameters, so there's nothing to de-duplicate there.
 
-`fetch_uk_districts.py` needs `requests` (in `requirements-dev.txt`). It paginates
-the FeatureServer at **25 records per request** — the layer's `maxRecordCount` is
-2000, but that's a record-count cap, not a payload-size one: full BFE geometry
-for this many districts in one big request is enough to hit Esri's own ~60s
-gateway timeout (confirmed: 500 records → 504; 25 reliably completes in
-single-digit seconds). Don't raise `PAGE_SIZE` without re-testing against the
-live service. `id` is a synthetic sequential integer (not the real `LAD25CD`
-code) — `MapView.jsx`'s bounds query builds a bare `IN (${ids.join(",")})` SQL
-list, which only works unquoted for numeric ids; the real code lives in the
-separate `lad_code` column. Some districts are `MultiPolygon` (island/exclave
-authorities) — `fetch_uk_districts.py`'s WKT writer handles both, unlike
-`generate_polygons.py`'s (single-ring `Polygon` only, since it's synthetic data).
+**tippecanoe moved from dev-only to a runtime dependency.** The refresh API
+tiles polygon datasets itself now, so the Dockerfile builds tippecanoe from
+source (`felt/tippecanoe` on GitHub) in its own stage rather than the old
+"install locally, tile by hand" flow. Built from source rather than copying
+a prebuilt binary (e.g. from `klokantech/tippecanoe`, what manual tiling used
+before this) because that image is amd64-only — a straight binary copy into
+an arm64 runtime (this project builds arm64-native on Apple Silicon) would
+be a non-executable binary, not just a library mismatch. Building from
+source compiles natively for whatever architecture is actually running the
+build. `numpy`/`pyarrow`/`requests` moved from `requirements-dev.txt` to
+`requirements.txt` for the same reason — `backend/refresh.py` runs the same
+fetch/generate code from inside the deployed app now, not just from a
+developer's machine.
 
-`msoa` (`fetch_msoa.py`) is a fourth tiled dataset — England & Wales Middle
-Super Output Area boundaries (7,264 of them, same ONS ArcGIS org, layer index
-**3** not 0). Same shape as `fetch_uk_districts.py` but pages fetched
-concurrently (`ThreadPoolExecutor`, 5 workers) since 7,264 records at a safe
-page size would take 6-7 minutes sequentially — this is I/O-bound waiting on
-the ArcGIS server, not CPU-bound, so threads are the right tool, not
-multiprocessing. Page size (150) was picked empirically per-endpoint, same as
-districts' 25 — don't assume one page size transfers to a new ONS dataset
-without testing it first (`maxRecordCount` is a record-count cap, not a
-payload-size one, and heavier full-BFE geometry can still time out under it).
+`docker-compose.yml` bind-mounts `backend/tiles` and `backend/registry.db`
+alongside the existing `backend/data` mount — without those, a refresh
+triggered through the running container writes into the container's own
+filesystem (whatever was baked in at image build time), invisible on the
+host and gone on the next rebuild.
 
-**Known gap:** `loadPolygonLayer`'s bounds-fit query selects `centroid_lat`/
-`centroid_lon` — columns `land_parcels` has but `uk_districts`/`msoa` don't. It
-fails silently (wrapped in a "framing is a nicety" try/catch), so selecting
-their results doesn't auto-zoom to fit them; the map stays at whatever view it
-had. Not yet fixed — either add centroid columns to those fetch scripts'
-parquet, or compute bounds a different way.
+**One-time migration** (`backend/migrate_to_registry.py`, already run —
+kept for reference/fresh-environment use, not something to run again in this
+repo) moved the old flat `backend/data/<name>.parquet` files into this
+layout and registered each as the current version.
+
+**Known gap:** `loadPolygonLayer`'s bounds-fit query (`MapView.jsx`) selects
+`centroid_lat`/`centroid_lon` — columns `land_parcels` has but
+`uk_districts`/`msoa` don't. It fails silently (wrapped in a "framing is a
+nicety" try/catch), so selecting their results doesn't auto-zoom to fit
+them; the map stays at whatever view it had. Not yet fixed.
 
 ### Map identify
 
@@ -223,15 +278,21 @@ over dataset name, which was the point of not hardcoding `land_parcels`.
 - **Geometry / map:** `_detect_geometry` flags a result as mappable when its
   columns include a lat (`lat`/`latitude`) and lon (`lon`/`lng`/`long`/`longitude`)
   pair; the response carries `geometry: {lat, lon} | null`. The frontend shows the
-  Map tab only when `geometry` is non-null. The map fetches points with
-  `sample: true` (DuckDB `USING SAMPLE reservoir(N ROWS)`) so a huge scan plots an
-  even spread, capped at `MAP_LIMIT`. Detection is name-based on purpose — a real
-  `GEOMETRY`/WKB column would need the DuckDB `spatial` extension and a WKB→GeoJSON
-  step; add that here, not in the frontend.
-- **Polygon tiles:** `TILES_DIR` (default `backend/tiles/`) holds pre-built
-  `.mbtiles` per dataset (SQLite; `tiles` table keyed by `zoom_level`/`tile_column`/
-  `tile_row`). `main.tile()` reads tiles directly with stdlib `sqlite3` — no tile
-  server process, no new dependency. `/api/datasets` exposes `hasTiles`; a query
+  Map tab only when `geometry` is non-null. The map fetches points with no
+  sampling and no real cap (`MAP_LIMIT` is a large sentinel, not a limit that's
+  meant to bind) — whatever `LIMIT` the query itself has (or doesn't have) is
+  what governs how many points come back. Detection is name-based on purpose —
+  a real `GEOMETRY`/WKB column would need the DuckDB `spatial` extension (now
+  loaded — see "Dataset refresh & versioning"'s spatial-join note below, or
+  search this file for `ST_Intersects`) and a WKB→GeoJSON step; add that here,
+  not in the frontend.
+- **Polygon tiles:** `TILES_DIR` (default `backend/tiles/`) holds
+  `<name>/<version>.mbtiles` per dataset (SQLite; `tiles` table keyed by
+  `zoom_level`/`tile_column`/`tile_row`) — versioned the same way `data/` is,
+  see "Dataset refresh & versioning". `main.tile()` reads tiles directly with
+  stdlib `sqlite3` via `engine.mbtiles_path()` (resolves the *current*
+  version) — no tile server process, no new dependency. `/api/datasets`
+  exposes `hasTiles`; a query
   result carries `polygonSource: "<name>" | null`, set by `engine._detect_polygon_source`
   when the result still has an `id` column *and* the dataset is the query's
   **primary FROM table** (`_primary_from_table` — just the first FROM target,

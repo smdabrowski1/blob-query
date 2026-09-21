@@ -6,3 +6,10 @@ duckdb>=1.1
 pydantic>=2.7
 anthropic>=0.69
 python-dotenv>=1.0
+# numpy/pyarrow/requests used to be dev-only (manual `python generate_*.py`/
+# `fetch_*.py` runs) — now runtime deps too, since the per-dataset refresh
+# API (backend/refresh.py) runs the same fetch/generate code from inside the
+# deployed app, not just from a developer's machine.
+numpy>=1.26
+pyarrow>=17
+requests>=2.31

@@ -10,12 +10,18 @@ export const TILE_BASE = BASE || window.location.origin;
 // Rows fetched per scroll window. Keep in sync with the grid's paging.
 export const CHUNK = 250;
 
-// Max points pulled for the map (reservoir-sampled across the whole result).
-export const MAP_LIMIT = 5000;
+// The map's single-shot fetch needs *some* integer to send as the request's
+// `limit` field (the API has no "no limit" value) — this is that sentinel,
+// not a real cap. The query's own LIMIT (the sidebar's default `LIMIT 1000`,
+// or whatever a user explicitly types — including no LIMIT at all) is what
+// actually governs the result; this number just needs to be comfortably
+// above every dataset in the app (largest today: sales_events, 1,000,000
+// rows) so it never truncates anything itself. No sampling — plain first-N
+// of whatever the query returns.
+export const MAP_LIMIT = 10_000_000;
 
-// Max polygon ids pulled to filter the pre-built tile layer (reservoir-sampled
-// beyond this, same idea as MAP_LIMIT). Matches the backend's /api/query cap.
-export const POLYGON_ID_LIMIT = 20000;
+// Same idea as MAP_LIMIT, for the polygon id-filter fetch.
+export const POLYGON_ID_LIMIT = 10_000_000;
 
 export async function getDatasets() {
   const r = await fetch(`${BASE}/api/datasets`);
@@ -45,6 +51,53 @@ export async function generateSql({ prompt }) {
 export async function refreshDatasets() {
   const r = await fetch(`${BASE}/api/datasets/refresh`, { method: "POST" });
   if (!r.ok) throw new Error("Failed to refresh datasets");
+  return (await r.json()).datasets;
+}
+
+// ---- Per-dataset refresh/versioning ----------------------------------------
+// Triggers a real re-fetch/re-generate (+ re-tile for polygon datasets),
+// not just a re-scan of what's already on disk (that's refreshDatasets()
+// above). Runs as a background job on the server; poll getRefreshStatus.
+
+export async function refreshDataset(name) {
+  const r = await fetch(`${BASE}/api/datasets/${name}/refresh`, { method: "POST" });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(body.detail || "Refresh failed to start");
+  }
+  return r.json();
+}
+
+export async function getRefreshStatus(name) {
+  const r = await fetch(`${BASE}/api/datasets/${name}/refresh-status`);
+  if (!r.ok) throw new Error("Failed to get refresh status");
+  return r.json();
+}
+
+// Every dataset with a job currently running, in one call — used on app
+// mount to discover in-flight jobs without polling each dataset by hand.
+export async function getRefreshJobs() {
+  const r = await fetch(`${BASE}/api/refresh-jobs`);
+  if (!r.ok) throw new Error("Failed to load refresh jobs");
+  return (await r.json()).jobs;
+}
+
+export async function getVersions(name) {
+  const r = await fetch(`${BASE}/api/datasets/${name}/versions`);
+  if (!r.ok) throw new Error("Failed to load versions");
+  return (await r.json()).versions;
+}
+
+export async function activateVersion(name, version) {
+  const r = await fetch(`${BASE}/api/datasets/${name}/activate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ version }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(body.detail || "Failed to activate version");
+  }
   return (await r.json()).datasets;
 }
 

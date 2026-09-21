@@ -22,9 +22,9 @@ function toRows(entries) {
 // Pre-built vector tiles (see backend/generate_polygons.py + tippecanoe) are
 // static — the query never changes their geometry. What changes per query is
 // *which* already-tiled polygon ids are visible, applied as a MapLibre filter.
-// Queries that don't keep `id` in their projection just show nothing (status
-// text explains why), rather than erroring.
-async function loadPolygonLayer(map, query, setStatus, setSelectedFeature, highlightRef, isCancelled) {
+// Queries that don't keep `id` in their projection just show nothing (logged
+// to the console, not surfaced as UI chrome), rather than erroring visibly.
+async function loadPolygonLayer(map, query, setSelectedFeature, highlightRef, isCancelled) {
   const name = query.polygonSource;
   // Strip a trailing ";" before embedding — it's fine as the outermost
   // statement terminator but breaks once nested inside `(...)`.
@@ -131,14 +131,12 @@ async function loadPolygonLayer(map, query, setStatus, setSelectedFeature, highl
     const idRes = await runQuery({
       sql: `SELECT id FROM (${innerSql}) AS _sub`,
       limit: POLYGON_ID_LIMIT,
-      sample: true,
     });
     ids = idRes.rows.map((r) => r[0]);
-  } catch {
+  } catch (err) {
     // Most often: the query's SELECT list dropped the `id` column, so there's
-    // nothing to filter the pre-built tiles by. Not an error worth alarming
-    // over — just nothing to show.
-    if (!isCancelled()) setStatus("This query doesn't keep an `id` column — no polygons to filter to");
+    // nothing to filter the pre-built tiles by.
+    console.warn("Map: query has no `id` column to filter polygons by", err);
     return;
   }
   if (isCancelled()) return;
@@ -167,19 +165,10 @@ async function loadPolygonLayer(map, query, setStatus, setSelectedFeature, highl
       // Framing is a nicety; keep whatever view the map already had.
     }
   }
-
-  if (isCancelled()) return;
-  const sampled = ids.length >= POLYGON_ID_LIMIT;
-  setStatus(
-    ids.length
-      ? `${ids.length.toLocaleString()} polygons${sampled ? " · sampled from a larger result" : ""}`
-      : "No matching polygons in this result"
-  );
 }
 
 export default function MapView({ query }) {
   const containerRef = useRef(null);
-  const [status, setStatus] = useState("Loading map…");
   const [selectedFeature, setSelectedFeature] = useState(null);
   // loadPolygonLayer attaches a .clear() here to reset the selection dim/highlight
   // — called from outside its closure (background click, panel's × button). A
@@ -187,7 +176,7 @@ export default function MapView({ query }) {
   const highlightRef = useRef(null);
 
   // Keyed by query.id at the parent, so this component remounts per query and
-  // this effect runs once: build the map, then load the sampled points.
+  // this effect runs once: build the map, then load points/polygons.
   useEffect(() => {
     const map = new maplibregl.Map({
       container: containerRef.current,
@@ -241,12 +230,12 @@ export default function MapView({ query }) {
       });
 
       if (query.polygonSource) {
-        await loadPolygonLayer(map, query, setStatus, setSelectedFeature, highlightRef, () => cancelled);
+        await loadPolygonLayer(map, query, setSelectedFeature, highlightRef, () => cancelled);
         return;
       }
 
       try {
-        const res = await runQuery({ sql: query.sql, limit: MAP_LIMIT, sample: true });
+        const res = await runQuery({ sql: query.sql, limit: MAP_LIMIT });
         if (cancelled) return;
 
         const li = res.columns.findIndex((c) => c.name === query.geometry.lat);
@@ -273,15 +262,8 @@ export default function MapView({ query }) {
 
         map.getSource("points").setData({ type: "FeatureCollection", features });
         if (features.length) map.fitBounds(bounds, { padding: 56, maxZoom: 11, duration: 0 });
-
-        const sampled = res.rows.length >= MAP_LIMIT;
-        setStatus(
-          features.length
-            ? `${features.length.toLocaleString()} points${sampled ? " · sampled from a larger result" : ""}`
-            : "No mappable points in this result"
-        );
       } catch (e) {
-        if (!cancelled) setStatus("Couldn't load map points — " + (e.message || e));
+        if (!cancelled) console.error("Map: couldn't load points", e);
       }
     });
 
@@ -294,7 +276,6 @@ export default function MapView({ query }) {
   return (
     <div className="mapview">
       <div className="map-container" ref={containerRef} />
-      <div className="map-status">{status}</div>
       <div className={`feature-panel ${selectedFeature ? "open" : ""}`}>
         {selectedFeature && (
           <>

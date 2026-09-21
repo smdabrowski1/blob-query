@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from pathlib import Path
 
 import anthropic
@@ -16,12 +17,16 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+import db as registry_db
 from engine import QueryEngine
+from refresh import run_refresh
+from registry import DATASETS as DATASET_CONFIG
 
 load_dotenv()  # picks up backend/.env in local dev; a no-op if it's absent
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).parent / "data"))
 TILES_DIR = Path(os.environ.get("TILES_DIR", Path(__file__).parent / "tiles"))
+REGISTRY_DB = Path(os.environ.get("REGISTRY_DB", Path(__file__).parent / "registry.db"))
 
 # Natural-language SQL generation is optional: without a key, /api/nl-query
 # reports itself unconfigured (503) instead of crashing the app.
@@ -39,7 +44,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-engine = QueryEngine(DATA_DIR, TILES_DIR)
+engine = QueryEngine(DATA_DIR, TILES_DIR, REGISTRY_DB)
 
 
 class QueryRequest(BaseModel):
@@ -72,7 +77,122 @@ def datasets():
 
 
 @app.post("/api/datasets/refresh")
-def refresh():
+def refresh_all():
+    """Re-scan: re-point every view at whatever registry.db currently marks
+    as each dataset's current version. Does not fetch/generate anything new
+    — that's the per-dataset endpoints below. Kept for "I changed something
+    on disk/in the DB directly, reload" use."""
+    engine.refresh()
+    return {"datasets": engine.list_datasets()}
+
+
+def _dataset_or_404(name: str) -> dict:
+    if name not in DATASET_CONFIG:
+        raise HTTPException(status_code=404, detail=f"Unknown dataset '{name}'")
+    return DATASET_CONFIG[name]
+
+
+@app.post("/api/datasets/{name}/refresh")
+def refresh_dataset(name: str):
+    _dataset_or_404(name)
+    con = registry_db.connect(REGISTRY_DB)
+    try:
+        registry_db.reap_stale_jobs(con, name)
+        if registry_db.has_running_job(con, name):
+            raise HTTPException(status_code=409, detail=f"A refresh for '{name}' is already running")
+    finally:
+        con.close()
+
+    def _job():
+        run_refresh(name, data_dir=DATA_DIR, tiles_dir=TILES_DIR, registry_db_path=REGISTRY_DB)
+        engine.refresh()  # re-point views at the new current version once the job lands it
+
+    threading.Thread(target=_job, daemon=True).start()
+    return {"status": "started"}
+
+
+@app.get("/api/datasets/{name}/refresh-status")
+def refresh_status(name: str):
+    _dataset_or_404(name)
+    con = registry_db.connect(REGISTRY_DB)
+    try:
+        row = registry_db.get_latest_status(con, name)
+    finally:
+        con.close()
+    if row is None:
+        return {"status": "idle"}
+    return {
+        "status": row["status"],
+        "version": row["version"],
+        "error": row["error"],
+        "startedAt": row["created_at"],
+        "completedAt": row["completed_at"],
+        "progressCurrent": row["progress_current"],
+        "progressTotal": row["progress_total"],
+    }
+
+
+@app.get("/api/refresh-jobs")
+def refresh_jobs():
+    """Every dataset with a job currently in flight, in one call — lets the
+    frontend discover on page load what's still running without polling each
+    dataset individually just to find out."""
+    con = registry_db.connect(REGISTRY_DB)
+    try:
+        rows = registry_db.list_running_jobs(con)
+    finally:
+        con.close()
+    return {
+        "jobs": [
+            {
+                "name": r["name"],
+                "status": r["status"],
+                "version": r["version"],
+                "error": r["error"],
+                "startedAt": r["created_at"],
+                "completedAt": r["completed_at"],
+                "progressCurrent": r["progress_current"],
+                "progressTotal": r["progress_total"],
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/api/datasets/{name}/versions")
+def dataset_versions(name: str):
+    _dataset_or_404(name)
+    con = registry_db.connect(REGISTRY_DB)
+    try:
+        rows = registry_db.list_versions(con, name)
+    finally:
+        con.close()
+    return {"versions": [dict(r) for r in rows]}
+
+
+class ActivateVersionRequest(BaseModel):
+    version: str
+
+
+@app.post("/api/datasets/{name}/activate")
+def activate_dataset_version(name: str, req: ActivateVersionRequest):
+    _dataset_or_404(name)
+    con = registry_db.connect(REGISTRY_DB)
+    try:
+        rows = {r["version"]: r for r in registry_db.list_versions(con, name)}
+        target = rows.get(req.version)
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"No version '{req.version}' for '{name}'")
+        if target["status"] not in ("active", "superseded"):
+            raise HTTPException(status_code=400, detail=f"Version '{req.version}' is not activatable (status: {target['status']})")
+        registry_db.activate_version(
+            con, name, req.version,
+            row_count=target["row_count"],
+            parquet_path=target["parquet_path"],
+            mbtiles_path=target["mbtiles_path"],
+        )
+    finally:
+        con.close()
     engine.refresh()
     return {"datasets": engine.list_datasets()}
 
@@ -83,7 +203,12 @@ def query(req: QueryRequest):
         return engine.run_query(
             req.sql,
             offset=max(0, req.offset),
-            limit=max(1, min(req.limit, 20000)),
+            # No upper cap — whatever LIMIT the submitted SQL has (or doesn't
+            # have) is what governs the result. The sidebar's default query
+            # already bakes in `LIMIT 1000`; a user who explicitly asks for
+            # more (or for everything) gets exactly that, not a second,
+            # hidden ceiling underneath their own.
+            limit=max(1, req.limit),
             include_total=req.include_total,
             sample=req.sample,
         )
@@ -144,8 +269,8 @@ def health():
 # matches first.
 @app.get("/tiles/{name}/{z}/{x}/{y}.pbf")
 def tile(name: str, z: int, x: int, y: int):
-    mbtiles = TILES_DIR / f"{name}.mbtiles"
-    if not mbtiles.is_file():
+    mbtiles = engine.mbtiles_path(name)
+    if mbtiles is None or not mbtiles.is_file():
         raise HTTPException(status_code=404, detail=f"No tileset for '{name}'")
     tms_y = (1 << z) - 1 - y  # mbtiles uses TMS row order, MapLibre requests XYZ
     con = sqlite3.connect(str(mbtiles))
