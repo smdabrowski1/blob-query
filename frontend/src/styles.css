@@ -76,14 +76,30 @@ body {
 }
 
 /* ---- Sidebar ------------------------------------------------------------- */
+/* Width itself is inline (React state driving drag-to-resize) — flex-shrink
+   still needs pinning to 0 here or a narrow viewport would compress it. */
 .sidebar {
-  width: 264px;
-  flex: 0 0 264px;
+  flex-shrink: 0;
+  position: relative;
   background: var(--panel);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+.sidebar-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 5;
+}
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle:active {
+  background: var(--accent-weak);
 }
 
 .sidebar-head {
@@ -95,8 +111,15 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
-.brand { font-weight: 700; letter-spacing: -0.01em; }
-.brand-dot { color: var(--accent); padding: 0 1px; }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 700;
+  font-size: 14.5px;
+  letter-spacing: -0.01em;
+}
+.brand-accent { color: var(--accent); }
 
 .icon-btn {
   background: transparent;
@@ -107,6 +130,12 @@ body {
   border-radius: var(--radius-sm);
   width: 28px;
   height: 28px;
+  /* Hosts a mix of SVG icons and plain glyph characters (×, ✎) — flex
+     centering keeps both true-centered instead of relying on inline
+     text-baseline alignment, which doesn't center an SVG the same way. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
   transition: color 0.12s var(--ease-out), background 0.12s var(--ease-out), transform 0.1s var(--ease-out);
 }
 .icon-btn:hover { color: var(--text); background: var(--panel-2); }
@@ -152,11 +181,18 @@ body {
   color: var(--faint);
   cursor: pointer;
   width: 18px;
-  font-size: 11px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 0;
-  transition: transform 0.1s var(--ease-out);
+  border-radius: var(--radius-sm);
+  transition: background 0.12s var(--ease-out);
 }
+.chevron:hover { color: var(--dim); background: var(--panel-2); }
 .chevron:active { transform: scale(0.85); }
+.chevron-icon { transition: transform 0.15s var(--ease-out); }
+.chevron-icon.open { transform: rotate(90deg); }
 
 .ds-name {
   flex: 1;
@@ -205,14 +241,21 @@ body {
 }
 .ds-refresh-phase:hover { color: var(--text); background: var(--panel-2); }
 .ds-refresh-phase.failed { color: var(--danger); }
-.ds-refresh-btn { font-size: 13px; }
 .ds-refresh-btn:disabled { cursor: default; opacity: 0.6; }
 .ds-refresh-btn:disabled:hover { background: none; }
+
+/* Unconditional (unlike .spin, only applied while actually running) —
+   without it, this span was a plain default-display inline box when idle,
+   which reads its child SVG against a text baseline instead of centering
+   it the way HistoryIcon's bare SVG (no wrapper at all) sits in the same
+   flex-centered button — a couple of px of visible vertical mismatch
+   between the two icons, even though both buttons' own boxes lined up. */
+.refresh-icon-wrap { display: flex; align-items: center; justify-content: center; }
 
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 /* A faster spin reads as faster progress even though the underlying job
    takes exactly as long — perceived-performance win, not a real one. */
-.spin { display: inline-block; animation: spin 0.6s linear infinite; }
+.spin { animation: spin 0.6s linear infinite; }
 @media (prefers-reduced-motion: reduce) {
   .spin { animation: none; }
 }
@@ -256,23 +299,104 @@ body {
 
 .cols { margin: 2px 0 6px 22px; border-left: 1px solid var(--border); }
 
-.col-row {
+/* .col-row used to be the clickable row itself (a <button>) — it's now a
+   wrapper, since a row can also carry a description line/editor beneath the
+   name+type line, and description text needs to stay selectable rather
+   than living inside a button. */
+.col-row { padding: 2px 4px 2px 10px; }
+.col-row:hover { background: var(--panel-2); }
+
+.col-row-main {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.col-row-insert {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
-  width: 100%;
   background: none;
   border: none;
   cursor: pointer;
-  padding: 2px 8px 2px 10px;
+  padding: 2px 4px 2px 0;
   color: var(--dim);
-  transition: background 0.12s var(--ease-out);
 }
-.col-row:hover { background: var(--panel-2); }
-.col-row:active { opacity: 0.7; }
 .col-name { font-family: var(--mono); font-size: 12.5px; color: var(--text); }
 .col-type { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+
+.col-edit-btn {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 0.12s var(--ease-out), color 0.12s var(--ease-out), background 0.12s var(--ease-out);
+}
+.col-row:hover .col-edit-btn,
+.col-row:focus-within .col-edit-btn {
+  opacity: 1;
+}
+
+/* Wraps (up to 3 lines, clamped) instead of truncating to one — the whole
+   point of this text is to be read, and a resizable sidebar (see
+   .sidebar-resize-handle) means there's usually room for it. Full text is
+   still in the title attribute for anything that clamps. */
+.col-desc {
+  font-size: 11.5px;
+  color: var(--dim);
+  line-height: 1.45;
+  padding: 0 4px 5px;
+  cursor: default;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.col-desc-edit {
+  padding: 2px 4px 6px;
+}
+.col-desc-input {
+  width: 100%;
+  height: 100%;
+  resize: none;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--ui);
+  font-size: 11.5px;
+  line-height: 1.4;
+  padding: 6px 8px;
+}
+.col-desc-input:focus { outline: 1px solid var(--accent); outline-offset: -1px; }
+.col-desc-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 5px;
+}
+.col-desc-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: background 0.12s var(--ease-out), transform 0.1s var(--ease-out);
+}
+.col-desc-btn:hover:not(:disabled) { background: var(--panel-2); }
+.col-desc-btn:active:not(:disabled) { transform: scale(0.97); }
+.col-desc-btn:disabled { opacity: 0.6; cursor: default; }
+.col-desc-btn.primary {
+  background: var(--accent-weak);
+  border-color: transparent;
+  color: var(--accent);
+}
 
 /* ---- Main ---------------------------------------------------------------- */
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -321,11 +445,14 @@ body {
   white-space: pre-wrap;
 }
 
+/* Height comes from ResizableTextarea's wrapper (a plain div with its
+   height in inline style, driven by drag state) — the textarea itself just
+   fills it, native `resize` turned off in favor of that shared drag handle
+   (see .resizable-textarea-handle) instead of the browser's own corner grip. */
 .editor {
   width: 100%;
-  height: 150px;
-  min-height: 60px;
-  resize: vertical;
+  height: 100%;
+  resize: none;
   border: none;
   outline: none;
   background: var(--bg);
@@ -338,12 +465,78 @@ body {
 }
 .editor::placeholder { color: var(--faint); }
 
+/* ---- Shared custom textarea resize handle ---------------------------------
+   Every resizable text box in the app (SQL/Ask AI editor, column
+   description editor) uses this instead of the browser's native
+   bottom-right resize grip — same drag-a-full-edge interaction as the
+   sidebar's own resize handle, not a tiny, easy-to-miss corner icon. */
+.resizable-textarea-wrap {
+  position: relative;
+  width: 100%;
+}
+.resizable-textarea-wrap textarea {
+  display: block;
+}
+.resizable-textarea-handle {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -4px;
+  height: 8px;
+  cursor: row-resize;
+  z-index: 2;
+}
+.resizable-textarea-handle:hover,
+.resizable-textarea-handle:active {
+  background: var(--accent-weak);
+}
+
 /* ---- Results ------------------------------------------------------------- */
 .results { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
 .results-body { flex: 1; min-height: 0; position: relative; }
 
 .grid-wrap { position: absolute; inset: 0; }
+
+/* Marks where the dataset's actual columns end when they don't fill the
+   whole viewport — without this the leftover canvas space reads as "part
+   of the grid" with no boundary. */
+.grid-right-filler {
+  height: 100%;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+}
+
+/* Glide Data Grid renders header + row-marker gutter + data cells onto one
+   canvas inside a single native-scrolling div (.dvn-scroller) — there's no
+   separate DOM region for "just the data columns" to scope a scrollbar to,
+   so the browser's native scrollbar necessarily spans the whole thing (it
+   can't start after the frozen id/row-number column, or below the header
+   row, without replacing it with a fully custom-built scrollbar). What's
+   achievable with the native one: keep it out of the way until the user
+   shows intent to scroll (hover, not just mid-scroll), and make it a bit
+   more substantial once shown. */
+.dvn-scroller::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+.dvn-scroller::-webkit-scrollbar-track {
+  background: transparent;
+}
+.dvn-scroller::-webkit-scrollbar-thumb {
+  background: transparent;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+.dvn-scroller:hover::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.28);
+  background-clip: padding-box;
+}
+.dvn-scroller::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.42);
+  background-clip: padding-box;
+}
 
 .empty {
   height: 100%;
@@ -389,7 +582,20 @@ body {
 .dot.error { background: var(--danger); }
 .dot.idle { background: var(--faint); }
 
-/* ---- Result tabs (Table / Map) ------------------------------------------- */
+/* ---- Result tabbar --------------------------------------------------------
+   Both tab groups (Table/Map, and Results/Full Dataset) share one .seg /
+   .seg-btn treatment — previously Table/Map used an underline-tab style and
+   Results/Full Dataset a pill-segment style, two different UI patterns for
+   the same kind of control. The trailing group (.res-tabbar-trailing) is a
+   wrapper carrying the single margin-left:auto that anchors it to the right
+   — it used to live on .seg itself alongside a second, independent
+   margin-left:auto on a row-count caption that rendered next to it; two
+   competing auto margins split the free space between them, so the segment
+   visibly drifted toward center whenever the caption was also present
+   (table tab) vs. sitting flush-right when it wasn't (map tab). The caption
+   was later dropped entirely (redundant with the statusbar's own row
+   count), but the single-anchor wrapper stays — right for any future
+   trailing content, not just today's one child. */
 .res-tabbar {
   height: 38px;
   flex: 0 0 38px;
@@ -400,6 +606,15 @@ body {
   border-bottom: 1px solid var(--border);
   background: var(--panel);
 }
+.res-tabbar-trailing {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* Still used by QueryEditor.jsx's SQL / Ask AI tabbar — a separate, smaller
+   tab pair that isn't part of this "make the two result-view segments match"
+   request, so it keeps its own (unrelated) underline-tab look. */
 .res-tab {
   background: none;
   border: none;
@@ -414,11 +629,9 @@ body {
 .res-tab:hover { color: var(--text); }
 .res-tab:active { transform: scale(0.97); }
 .res-tab.active { color: var(--text); border-bottom-color: var(--accent); }
-.res-caption { margin-left: auto; color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 
-/* ---- Segmented control (Results / Full Dataset) --------------------------- */
+/* ---- Segmented control (Table / Map, and Results / Full Dataset) --------- */
 .seg {
-  margin-left: auto;
   display: flex;
   gap: 2px;
   padding: 2px;
@@ -565,7 +778,7 @@ body {
 @keyframes refresh-fade-in { from { opacity: 0; } to { opacity: 1; } }
 
 .refresh-modal {
-  width: 340px;
+  width: 420px;
   max-width: calc(100% - 32px);
   background: #ffffff;
   border: 1px solid var(--border);
@@ -637,6 +850,30 @@ body {
   from { left: -40%; }
   to { left: 100%; }
 }
+/* What it's actually doing right now — which endpoint, which page, tippecanoe's
+   own output — not just how far along. Monospace + dark chrome (unlike the
+   rest of this light-themed modal) on purpose: it reads as a terminal/log
+   excerpt, a different register from the surrounding UI copy. */
+.refresh-modal-log {
+  margin-top: 12px;
+  background: #1a1a1a;
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  max-height: 160px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.refresh-modal-log-line {
+  color: #d4d4d4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.refresh-modal-log-ts {
+  color: #7a7a7a;
+  margin-right: 8px;
+}
 .refresh-modal-error {
   margin-top: 12px;
   font-size: 12px;
@@ -674,50 +911,10 @@ body {
   color: var(--accent);
 }
 
-.refresh-pill-stack {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  z-index: 15;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  align-items: flex-end;
-}
-.refresh-pill {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 7px 14px;
-  font-size: 12px;
-  color: var(--text);
-  cursor: pointer;
-  box-shadow: var(--shadow-md);
-  transition: transform 0.1s var(--ease-out), background 0.12s var(--ease-out);
-  animation: refresh-pill-in 0.2s var(--ease-spring);
-}
-@keyframes refresh-pill-in {
-  from { transform: translateY(6px); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
-}
-.refresh-pill:hover { background: rgba(255, 255, 255, 0.98); }
-.refresh-pill:active { transform: scale(0.97); }
-.refresh-pill-name { font-family: var(--mono); color: var(--dim); }
-.refresh-pill-phase { color: var(--text); }
-.refresh-pill.failed .refresh-pill-phase { color: var(--danger); }
-.refresh-pill.active .refresh-pill-phase { color: var(--success); }
-
 @media (prefers-reduced-motion: reduce) {
   .refresh-modal-backdrop { animation: none; }
   .refresh-modal { animation: none; }
-  .refresh-pill { animation: none; }
-  .refresh-modal-btn:active,
-  .refresh-pill:active {
+  .refresh-modal-btn:active {
     transform: none;
   }
   /* Swap the sweeping segment for a static half-filled bar — still reads

@@ -5,6 +5,40 @@ import { runQuery, CHUNK } from "../api";
 
 const NUMERIC = /INT|DECIMAL|DOUBLE|FLOAT|REAL|NUMERIC|HUGEINT/i;
 
+// Column sizing: fit the content instead of every column getting the same
+// fixed width regardless of whether it holds "id" or a multi-thousand-
+// character geometry WKT string. Capped at MAX_COL_CHARS so one long-text
+// column (typically `geometry`) can't dominate the grid and push every
+// column after it off-screen — horizontal scroll reaches the rest instead.
+const MIN_COL_CHARS = 4;
+const MAX_COL_CHARS = 30;
+// JetBrains Mono @ 13px (this grid's font — see gridTheme below): a rough
+// but consistent per-character advance width, since a canvas grid has no
+// DOM text to actually measure against.
+const CHAR_WIDTH_PX = 7.8;
+const CELL_PADDING_PX = 28; // cellHorizontalPadding (10 each side) + margin
+
+function charsToWidth(chars) {
+  return Math.round(chars * CHAR_WIDTH_PX + CELL_PADDING_PX);
+}
+
+// Sample the rows already in hand (the query's first chunk) to size a
+// column against what it actually contains, not a guess — capped at
+// MAX_COL_CHARS either way, so a column doesn't need every row scanned to
+// know it should be truncated.
+function computeColumnCharCaps(columns, sampleRows) {
+  const caps = columns.map((c) => Math.min(MAX_COL_CHARS, Math.max(MIN_COL_CHARS, c.name.length)));
+  for (const row of sampleRows || []) {
+    for (let i = 0; i < columns.length; i++) {
+      if (caps[i] >= MAX_COL_CHARS) continue; // already at the ceiling, no point checking more
+      const v = row[i];
+      const len = v === null || v === undefined ? 4 : String(v).length; // "NULL"
+      if (len > caps[i]) caps[i] = Math.min(MAX_COL_CHARS, len);
+    }
+  }
+  return caps;
+}
+
 // Light theme tuned to match the app shell. Selection/link accents use the
 // status teal rather than the brand coral (styles.css's --accent) — a data
 // grid's own selection outline is a different kind of "accent" than a CTA
@@ -59,14 +93,22 @@ export default function ResultsGrid({ query }) {
   const [version, setVersion] = useState(0); // bump to force a redraw
 
   const [gridColumns, setGridColumns] = useState([]);
+  // Per-column character cap used to shorten over-length cell text (a long
+  // `geometry` WKT string, mainly) with a visible "…" rather than letting
+  // canvas rendering just clip it mid-character at the cell boundary —
+  // computed once per query, alongside column widths, from the same sample.
+  const charCapsRef = useRef([]);
 
   // Reset everything whenever a new query runs.
   useEffect(() => {
     chunksRef.current = new Map();
     loadingRef.current = new Set();
     if (query.initialRows) chunksRef.current.set(0, query.initialRows);
+
+    const caps = computeColumnCharCaps(query.columns, query.initialRows);
+    charCapsRef.current = caps;
     setGridColumns(
-      query.columns.map((c) => ({ title: c.name, id: c.name, width: 170 }))
+      query.columns.map((c, i) => ({ title: c.name, id: c.name, width: charsToWidth(caps[i]) }))
     );
     setVersion((v) => v + 1);
   }, [query.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -118,10 +160,18 @@ export default function ResultsGrid({ query }) {
       const raw = chunk[row % CHUNK]?.[col];
       const isNull = raw === null || raw === undefined;
       const display = isNull ? "NULL" : String(raw);
+      // `data` always carries the full value (so clicking a cell's overlay
+      // still shows/copies the complete geometry WKT, not the shortened
+      // preview) — only `displayData`, what's actually painted in the cell,
+      // gets cut down to the column's char cap. An explicit "…" beats
+      // letting the canvas silently clip the string mid-character at
+      // whatever pixel the column happens to end at.
+      const cap = charCapsRef.current[col] ?? MAX_COL_CHARS;
+      const displayData = display.length > cap ? `${display.slice(0, cap)}…` : display;
       return {
         kind: GridCellKind.Text,
         data: isNull ? "" : display,
-        displayData: display,
+        displayData,
         allowOverlay: true,
         readonly: true,
         contentAlign: numeric ? "right" : "left",
@@ -156,6 +206,12 @@ export default function ResultsGrid({ query }) {
           smoothScrollX
           smoothScrollY
           theme={gridTheme}
+          // Fills whatever's left after the last real column with a plain
+          // bordered strip instead of blank canvas — otherwise there's no
+          // visual line marking "this is where the dataset actually ends"
+          // when total column width is narrower than the grid's viewport.
+          rightElement={<div className="grid-right-filler" />}
+          rightElementProps={{ sticky: true, fill: true }}
         />
       ) : null,
     [ready, size.w, size.h, gridColumns, rows, getCellContent, onVisibleRegionChanged, onColumnResize]

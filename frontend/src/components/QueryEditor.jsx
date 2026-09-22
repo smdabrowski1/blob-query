@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { generateSql } from "../api";
+import ResizableTextarea from "./ResizableTextarea.jsx";
 
 export default function QueryEditor({ sql, setSql, onRun, status, aiEnabled }) {
   const [mode, setMode] = useState("sql"); // sql | ai
@@ -57,7 +58,7 @@ export default function QueryEditor({ sql, setSql, onRun, status, aiEnabled }) {
             </button>
             <span className="kbd">⌘ / Ctrl + Enter</span>
           </div>
-          <textarea
+          <ResizableTextarea
             className="editor"
             value={sql}
             onChange={(e) => setSql(e.target.value)}
@@ -77,7 +78,7 @@ export default function QueryEditor({ sql, setSql, onRun, status, aiEnabled }) {
               <span className="ai-note">Not configured — set ANTHROPIC_API_KEY in backend/.env</span>
             )}
           </div>
-          <textarea
+          <ResizableTextarea
             className="editor"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}

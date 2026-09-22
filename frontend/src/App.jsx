@@ -246,14 +246,10 @@ export default function App() {
         refreshJobs={refreshJobs}
         onStartRefresh={startRefresh}
         onReopenRefresh={reopenJob}
+        onDatasetsUpdated={setDatasets}
       />
 
-      <RefreshModal
-        jobs={refreshJobs}
-        onMinimize={minimizeJob}
-        onReopen={reopenJob}
-        onDismiss={dismissJob}
-      />
+      <RefreshModal jobs={refreshJobs} onMinimize={minimizeJob} onDismiss={dismissJob} />
 
       <div className="main">
         <QueryEditor
@@ -266,45 +262,49 @@ export default function App() {
 
         <div className="results">
           <div className="res-tabbar">
-            <button
-              className={`res-tab ${resultTab === "table" ? "active" : ""}`}
-              onClick={() => setResultTab("table")}
-            >
-              Table
-            </button>
-            {hasGeometry && (
+            <div className="seg" role="tablist" aria-label="View">
               <button
-                className={`res-tab ${resultTab === "map" ? "active" : ""}`}
-                onClick={() => setResultTab("map")}
+                className={`seg-btn ${resultTab === "table" ? "active" : ""}`}
+                onClick={() => setResultTab("table")}
               >
-                Map
+                Table
               </button>
-            )}
-            {activeQuery && status !== "error" && activeQuery.baseTable && (
-              <div className="seg" role="tablist" aria-label="Data source">
+              {hasGeometry && (
                 <button
-                  className={`seg-btn ${viewMode === "query" ? "active" : ""}`}
-                  onClick={() => setViewMode("query")}
+                  className={`seg-btn ${resultTab === "map" ? "active" : ""}`}
+                  onClick={() => setResultTab("map")}
                 >
-                  Results
+                  Map
                 </button>
-                <button
-                  className={`seg-btn ${viewMode === "full" ? "active" : ""}`}
-                  onClick={loadFullDataset}
-                >
-                  {fullDatasetLoading ? "Loading…" : "Full Dataset"}
-                </button>
-              </div>
-            )}
-            {activeQuery && status !== "error" && (
-              <span className="res-caption">
-                {resultTab === "map"
-                  ? displayQuery.polygonSource
-                    ? "polygons synced to query"
-                    : "points synced to query"
-                  : `${displayQuery.total?.toLocaleString()} rows`}
-              </span>
-            )}
+              )}
+            </div>
+
+            {/* This whole trailing group (source-segment + row count) is one
+                right-anchored unit — margin-left:auto lives only on it, not
+                also on the caption, so the group's position doesn't shift
+                depending on whether the caption happens to be rendered
+                (previously: both had their own auto margin, splitting the
+                free space between them and making the segment drift toward
+                center on the table tab, flush-right only on the map tab
+                where the caption is absent). */}
+            <div className="res-tabbar-trailing">
+              {activeQuery && status !== "error" && activeQuery.baseTable && (
+                <div className="seg" role="tablist" aria-label="Data source">
+                  <button
+                    className={`seg-btn ${viewMode === "query" ? "active" : ""}`}
+                    onClick={() => setViewMode("query")}
+                  >
+                    Results
+                  </button>
+                  <button
+                    className={`seg-btn ${viewMode === "full" ? "active" : ""}`}
+                    onClick={loadFullDataset}
+                  >
+                    {fullDatasetLoading ? "Loading…" : "Full Dataset"}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="results-body">

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { formatVersionUK } from "../formatTime";
 
 const PHASE_LABEL = {
@@ -20,6 +21,39 @@ function progressLabel(job) {
   const frac = progressFraction(job);
   if (frac == null) return null;
   return `${Math.round(frac * 100)}%`;
+}
+
+// Each log line is stored server-side as "<ISO timestamp>  <message>" — split
+// that back apart so the timestamp can render as a de-emphasized prefix
+// instead of competing with the actual message for attention.
+function splitLogLine(line) {
+  const m = /^(\S+)\s\s(.*)$/.exec(line);
+  return m ? { ts: m[1], message: m[2] } : { ts: null, message: line };
+}
+
+function LogPanel({ log }) {
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [log]);
+
+  if (!log || log.length === 0) return null;
+
+  return (
+    <div className="refresh-modal-log" ref={scrollRef}>
+      {log.map((line, i) => {
+        const { ts, message } = splitLogLine(line);
+        return (
+          <div className="refresh-modal-log-line" key={i}>
+            {ts && <span className="refresh-modal-log-ts">{ts.slice(11, 19)}</span>}
+            <span>{message}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function JobModal({ name, job, onMinimize, onDismiss }) {
@@ -54,6 +88,8 @@ function JobModal({ name, job, onMinimize, onDismiss }) {
           />
         </div>
 
+        <LogPanel log={job.log} />
+
         {job.status === "failed" && (
           <div className="refresh-modal-error">{job.error || "Refresh failed."}</div>
         )}
@@ -79,43 +115,19 @@ function JobModal({ name, job, onMinimize, onDismiss }) {
   );
 }
 
-function JobPill({ name, job, onReopen }) {
-  const pct = progressLabel(job);
-  const label = PHASE_LABEL[job.status] || job.status;
-  return (
-    <button
-      className={`refresh-pill ${job.status}`}
-      onClick={() => onReopen(name)}
-      title={job.error || undefined}
-    >
-      <span className="refresh-pill-name">{name}</span>
-      <span className="refresh-pill-phase">
-        {label}
-        {pct != null && RUNNING_STATUSES.has(job.status) ? ` ${pct}` : ""}
-      </span>
-    </button>
-  );
-}
-
-export default function RefreshModal({ jobs, onMinimize, onReopen, onDismiss }) {
-  const entries = Object.entries(jobs);
-  if (entries.length === 0) return null;
-
-  const open = entries.filter(([, job]) => !job.minimized);
-  const minimized = entries.filter(([, job]) => job.minimized);
+// Minimized jobs render nothing here — the sidebar's own inline phase badge
+// (Sidebar.jsx's DatasetRefreshControl) already shows live status next to
+// the dataset and reopens this modal on click, so a second floating
+// indicator for the same state was redundant chrome, not extra information.
+export default function RefreshModal({ jobs, onMinimize, onDismiss }) {
+  const open = Object.entries(jobs).filter(([, job]) => !job.minimized);
+  if (open.length === 0) return null;
 
   return (
     <>
       {open.map(([name, job]) => (
         <JobModal key={name} name={name} job={job} onMinimize={onMinimize} onDismiss={onDismiss} />
       ))}
-      {minimized.length > 0 && (
-        <div className="refresh-pill-stack">
-          {minimized.map(([name, job]) => (
-            <JobPill key={name} name={name} job={job} onReopen={onReopen} />
-          ))}
-        </div>
-      )}
     </>
   );
 }

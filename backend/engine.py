@@ -209,23 +209,28 @@ class QueryEngine:
         # surfacing as `fetchone()` returning None (backend looked "down" to
         # the frontend when it was actually a 500 from this race).
         cur = self.con.cursor()
-        out = []
-        for view, path in self._views.items():
-            cols = [
-                {"name": r[0], "type": r[1]}
-                for r in cur.execute(f'DESCRIBE "{view}"').fetchall()
-            ]
-            rows = cur.execute(f'SELECT count(*) FROM "{view}"').fetchone()[0]
-            out.append(
-                {
-                    "name": view,
-                    "file": path.name,
-                    "rows": rows,
-                    "columns": cols,
-                    "hasTiles": self._has_tiles(view),
-                    "tileZoom": self.tile_zoom_range(view),
-                }
-            )
+        reg_con = registry_db.connect(self.registry_db_path)
+        try:
+            out = []
+            for view, path in self._views.items():
+                descriptions = registry_db.get_column_descriptions(reg_con, view)
+                cols = [
+                    {"name": r[0], "type": r[1], "description": descriptions.get(r[0], "")}
+                    for r in cur.execute(f'DESCRIBE "{view}"').fetchall()
+                ]
+                rows = cur.execute(f'SELECT count(*) FROM "{view}"').fetchone()[0]
+                out.append(
+                    {
+                        "name": view,
+                        "file": path.name,
+                        "rows": rows,
+                        "columns": cols,
+                        "hasTiles": self._has_tiles(view),
+                        "tileZoom": self.tile_zoom_range(view),
+                    }
+                )
+        finally:
+            reg_con.close()
         return out
 
     # ---- querying -------------------------------------------------------------

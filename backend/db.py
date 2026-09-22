@@ -46,6 +46,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
           mbtiles_path TEXT,
           progress_current INTEGER,
           progress_total INTEGER,
+          log TEXT,
           PRIMARY KEY (name, version)
         )
         """
@@ -54,11 +55,29 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     # existed under the old schema (this app's registry.db predates progress
     # tracking) — ALTER TABLE ADD COLUMN one at a time, ignoring "duplicate
     # column" if it's already been done.
-    for col in ("progress_current INTEGER", "progress_total INTEGER"):
+    for col in ("progress_current INTEGER", "progress_total INTEGER", "log TEXT"):
         try:
             con.execute(f"ALTER TABLE dataset_versions ADD COLUMN {col}")
         except sqlite3.OperationalError:
             pass  # already has this column
+
+    # Keyed by (dataset_name, column_name) — not by version. The column
+    # *set* comes from registry.py's field_mapping/generator code, which is
+    # identical across every version of a given dataset name; only the data
+    # changes per version, never the schema shape. A version-scoped key
+    # would just be duplicate rows with no real difference, and would mean
+    # descriptions vanishing every time a dataset gets re-fetched.
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS column_descriptions (
+          dataset_name TEXT NOT NULL,
+          column_name TEXT NOT NULL,
+          description TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (dataset_name, column_name)
+        )
+        """
+    )
     return con
 
 
@@ -129,6 +148,33 @@ def set_progress(con: sqlite3.Connection, name: str, version: str, current: int,
     con.commit()
 
 
+MAX_LOG_LINES = 200
+
+
+def append_log(con: sqlite3.Connection, name: str, version: str, message: str) -> None:
+    """Append one line to a job's running log (which endpoint, which page,
+    tippecanoe's own output, etc.) — the modal's progress bar says *how far
+    along*, this says *what it's actually doing*. Informational only, same
+    reasoning as set_progress: a read-modify-write with no transaction
+    wrapper is fine here (worst case on a lost update is a gap in the log,
+    never an inconsistent is_current). Trimmed to the most recent
+    MAX_LOG_LINES so a chatty job (49 ArcGIS pages, a tippecanoe run ticking
+    once a second for minutes) can't grow this column without bound."""
+    row = con.execute(
+        "SELECT log FROM dataset_versions WHERE name=? AND version=?", (name, version)
+    ).fetchone()
+    existing = row[0] if row and row[0] else ""
+    lines = existing.split("\n") if existing else []
+    lines.append(f"{_now()}  {message}")
+    if len(lines) > MAX_LOG_LINES:
+        lines = lines[-MAX_LOG_LINES:]
+    con.execute(
+        "UPDATE dataset_versions SET log=? WHERE name=? AND version=?",
+        ("\n".join(lines), name, version),
+    )
+    con.commit()
+
+
 def fail_job(con: sqlite3.Connection, name: str, version: str, error: str) -> None:
     with con:
         con.execute(
@@ -169,6 +215,37 @@ def activate_version(
             params.append(mbtiles_path)
         params += [name, version]
         con.execute(f"UPDATE dataset_versions SET {', '.join(fields)} WHERE name=? AND version=?", params)
+
+
+def get_column_descriptions(con: sqlite3.Connection, dataset_name: str) -> dict[str, str]:
+    rows = con.execute(
+        "SELECT column_name, description FROM column_descriptions WHERE dataset_name=?", (dataset_name,)
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+def set_column_description(con: sqlite3.Connection, dataset_name: str, column_name: str, description: str) -> None:
+    """Upsert. An empty string clears a description back to "none set"
+    rather than being a distinct valid value — the UI treats both the same
+    way (falls back to no description), so there's no reason to keep a row
+    with nothing meaningful in it."""
+    with con:
+        description = description.strip()
+        if not description:
+            con.execute(
+                "DELETE FROM column_descriptions WHERE dataset_name=? AND column_name=?",
+                (dataset_name, column_name),
+            )
+            return
+        con.execute(
+            """
+            INSERT INTO column_descriptions (dataset_name, column_name, description, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (dataset_name, column_name)
+            DO UPDATE SET description=excluded.description, updated_at=excluded.updated_at
+            """,
+            (dataset_name, column_name, description, _now()),
+        )
 
 
 def get_current(con: sqlite3.Connection, name: str) -> sqlite3.Row | None:

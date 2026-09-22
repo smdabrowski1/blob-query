@@ -82,6 +82,21 @@ export async function getRefreshJobs() {
   return (await r.json()).jobs;
 }
 
+// Column descriptions are keyed by (dataset, column) only — not by version —
+// so they persist across refreshes automatically; see backend/db.py.
+export async function setColumnDescription(name, column, description) {
+  const r = await fetch(`${BASE}/api/datasets/${name}/columns/${column}/description`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ description }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(body.detail || "Failed to save description");
+  }
+  return (await r.json()).datasets;
+}
+
 export async function getVersions(name) {
   const r = await fetch(`${BASE}/api/datasets/${name}/versions`);
   if (!r.ok) throw new Error("Failed to load versions");

@@ -64,10 +64,21 @@ class SQLGeneration(BaseModel):
 
 
 def _schema_prompt() -> str:
+    # Column descriptions (registry.db, user-editable via the sidebar) are
+    # what actually let this do better than guessing from a bare column
+    # name — e.g. knowing `ruc_code` means "rural-urban classification"
+    # rather than inferring it from four letters. Kept on separate lines
+    # from the compact name/type list rather than inlined as SQL `--`
+    # comments per column — mid-line "--" reads as "everything after this
+    # is a comment" to a model that's seen a lot of real SQL, which would
+    # misleadingly swallow the columns listed after it on the same line.
     lines = []
     for ds in engine.list_datasets():
         cols = ", ".join(f"{c['name']} {c['type']}" for c in ds["columns"])
         lines.append(f"- {ds['name']}({cols})")
+        for c in ds["columns"]:
+            if c["description"]:
+                lines.append(f"    {ds['name']}.{c['name']}: {c['description']}")
     return "\n".join(lines)
 
 
@@ -92,6 +103,26 @@ def _dataset_or_404(name: str) -> dict:
     return DATASET_CONFIG[name]
 
 
+class ColumnDescriptionRequest(BaseModel):
+    description: str
+
+
+@app.put("/api/datasets/{name}/columns/{column}/description")
+def set_column_description(name: str, column: str, req: ColumnDescriptionRequest):
+    _dataset_or_404(name)
+    known_columns = {c["name"] for ds in engine.list_datasets() if ds["name"] == name for c in ds["columns"]}
+    if not known_columns:
+        raise HTTPException(status_code=404, detail=f"'{name}' has no active version to have columns yet")
+    if column not in known_columns:
+        raise HTTPException(status_code=404, detail=f"'{name}' has no column '{column}'")
+    con = registry_db.connect(REGISTRY_DB)
+    try:
+        registry_db.set_column_description(con, name, column, req.description)
+    finally:
+        con.close()
+    return {"datasets": engine.list_datasets()}
+
+
 @app.post("/api/datasets/{name}/refresh")
 def refresh_dataset(name: str):
     _dataset_or_404(name)
@@ -109,6 +140,10 @@ def refresh_dataset(name: str):
 
     threading.Thread(target=_job, daemon=True).start()
     return {"status": "started"}
+
+
+def _split_log(raw: str | None) -> list[str]:
+    return raw.split("\n") if raw else []
 
 
 @app.get("/api/datasets/{name}/refresh-status")
@@ -129,6 +164,7 @@ def refresh_status(name: str):
         "completedAt": row["completed_at"],
         "progressCurrent": row["progress_current"],
         "progressTotal": row["progress_total"],
+        "log": _split_log(row["log"]),
     }
 
 
@@ -153,6 +189,7 @@ def refresh_jobs():
                 "completedAt": r["completed_at"],
                 "progressCurrent": r["progress_current"],
                 "progressTotal": r["progress_total"],
+                "log": _split_log(r["log"]),
             }
             for r in rows
         ]

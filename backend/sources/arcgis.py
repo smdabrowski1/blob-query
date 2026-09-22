@@ -8,11 +8,15 @@ Page size and concurrency are tuned per-endpoint in registry.py, not
 guessable from a general rule: a FeatureServer's advertised `maxRecordCount`
 is a record-count cap, not a payload-size one — full-BFE-resolution
 geometry (detailed coastlines) can hit the server's own request timeout well
-under that cap. Empirically, uk_districts (heavier per-feature geometry)
-needed page_size=25, sequential; msoa (lighter per-feature, 20x more
-records) tolerated page_size=150 with 5 concurrent workers. Pulling data
-this way is I/O-bound waiting on the server, not CPU-bound, so a thread
-pool is the right concurrency tool, not multiprocessing.
+under that cap. uk_districts (heavier per-feature geometry) uses a small
+page_size=25 for that reason; msoa/oa (lighter per-feature) tolerate much
+bigger pages. All three currently run at max_workers=4 — a uniform value
+chosen for simplicity over the originally more conservative per-endpoint
+concurrency (uk_districts started sequential); if a given endpoint starts
+timing out or erroring under concurrent load, page_size is the first thing
+to shrink, since that's what actually governs per-request payload weight.
+Pulling data this way is I/O-bound waiting on the server, not CPU-bound, so
+a thread pool is the right concurrency tool, not multiprocessing.
 """
 from __future__ import annotations
 
@@ -60,7 +64,9 @@ def _get_total_count(url: str) -> int:
     return data["count"]
 
 
-def fetch_all_features(url: str, page_size: int, max_workers: int = 1, on_progress=None) -> list[dict]:
+def fetch_all_features(
+    url: str, page_size: int, max_workers: int = 1, on_progress=None, on_log=None
+) -> list[dict]:
     """Pull every feature as WGS84 GeoJSON, paginating with retries, then
     verify the fetched count matches what the server itself reported at the
     start — a page silently coming back short (a transient hiccup that
@@ -69,10 +75,16 @@ def fetch_all_features(url: str, page_size: int, max_workers: int = 1, on_progre
 
     on_progress(pages_done, pages_total), if given, is called as each page
     completes — works the same whether max_workers is 1 or more, since it's
-    driven by as_completed() either way."""
+    driven by as_completed() either way. on_log(message), if given, mirrors
+    what's already printed to stdout into the refresh job's persisted log
+    (see db.append_log) — same events, just also visible in the UI modal,
+    not only container logs."""
     total = _get_total_count(url)
     offsets = list(range(0, total, page_size))
-    print(f"Fetching {total:,} features in {len(offsets)} pages ({page_size}/page, {max_workers} worker(s))...")
+    start_msg = f"Fetching from {url} — {total:,} features in {len(offsets)} pages ({page_size}/page, {max_workers} worker(s))"
+    print(start_msg)
+    if on_log:
+        on_log(start_msg)
 
     pages: dict[int, list[dict]] = {}
     done = 0
@@ -85,7 +97,10 @@ def fetch_all_features(url: str, page_size: int, max_workers: int = 1, on_progre
                 raise RuntimeError(f"ArcGIS error at offset {off}: {data['error']}")
             pages[off] = data.get("features", [])
             done += 1
+            page_msg = f"Page {done}/{len(offsets)} fetched (offset {off}, {len(pages[off])} features)"
             print(f"  page done (offset {off}, {len(pages[off])} features)")
+            if on_log:
+                on_log(page_msg)
             if on_progress:
                 on_progress(done, len(offsets))
 
@@ -151,11 +166,15 @@ def build_table(features: list[dict], field_mapping: dict[str, str], float_field
     return table, {"type": "FeatureCollection", "features": geojson_features}
 
 
-def fetch_arcgis_dataset(config: dict, on_progress=None):
+def fetch_arcgis_dataset(config: dict, on_progress=None, on_log=None):
     """config: a registry.py DATASETS[name] entry with kind == 'arcgis'.
     Returns (pyarrow.Table, geojson_dict) — same shape generate_polygons.py's
     build_polygons returns, so refresh.py can treat both kinds uniformly."""
     features = fetch_all_features(
-        config["feature_server"], config["page_size"], config.get("max_workers", 1), on_progress=on_progress
+        config["feature_server"],
+        config["page_size"],
+        config.get("max_workers", 1),
+        on_progress=on_progress,
+        on_log=on_log,
     )
     return build_table(features, config["field_mapping"], config["float_fields"], config["tile_fields"])

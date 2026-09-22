@@ -55,13 +55,21 @@ def _throttled(fn, min_interval=1.0):
     return wrapped
 
 
-def _run_tippecanoe(cmd: list[str], on_progress) -> None:
+def _run_tippecanoe(cmd: list[str], on_progress, on_log=None) -> None:
     """Runs tippecanoe as a streaming subprocess instead of run-and-wait, so
     its progress meter (single-line, carriage-return-updated output like
     ` 50.0%  7/64/41` — not one line per update) can be parsed as it happens.
     Stdout+stderr are merged: it isn't certain which stream the meter uses,
     and merging sidesteps the question. Reads one character at a time to
-    correctly split on '\\r' as well as '\\n'."""
+    correctly split on '\\r' as well as '\\n'.
+
+    Lines that aren't a bare percentage tick (tippecanoe also prints real
+    status lines — e.g. what it inferred about the input, per-layer feature
+    counts) are forwarded to on_log verbatim, same as arcgis.py's per-page
+    lines — this is what actually makes the job's log read like tippecanoe's
+    own terminal output rather than just a percentage counter."""
+    if on_log:
+        on_log(f"Running: {' '.join(cmd)}")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     buf = ""
     tail = ""  # last ~2000 chars seen, for the error message on failure
@@ -76,6 +84,8 @@ def _run_tippecanoe(cmd: list[str], on_progress) -> None:
                     m = _PERCENT_RE.search(buf)
                     if m:
                         on_progress(float(m.group(1)), 100)
+                    elif on_log:
+                        on_log(buf.strip())
                 buf = ""
             else:
                 buf += ch
@@ -93,7 +103,7 @@ def _clear_stale_tmp(dataset_dir: Path, tiles_dataset_dir: Path) -> None:
                 f.unlink()
 
 
-def _build(config: dict, on_progress=None):
+def _build(config: dict, on_progress=None, on_log=None):
     """Dispatch on kind. Each builder has a genuinely different return shape
     (they predate this orchestrator and are proven working) — normalized
     here rather than forced into a fake common interface. Returns
@@ -101,12 +111,16 @@ def _build(config: dict, on_progress=None):
     writes the tippecanoe input if this is a polygon dataset.
 
     on_progress is only meaningful for kind == "arcgis" — the generated
-    kinds run entirely in-process with no long-running I/O to report on."""
+    kinds run entirely in-process, fast enough that there's no meaningful
+    "which call are we on" to report; on_log still gets a single line so the
+    modal isn't blank while that runs."""
     kind = config["kind"]
     if kind == "arcgis":
-        table, geojson_dict = arcgis.fetch_arcgis_dataset(config, on_progress=on_progress)
+        table, geojson_dict = arcgis.fetch_arcgis_dataset(config, on_progress=on_progress, on_log=on_log)
         return table, lambda path: path.write_text(json.dumps(geojson_dict))
     if kind == "generated_polygons":
+        if on_log:
+            on_log(f"Generating {config['count']:,} synthetic polygons (seed={config['seed']})")
         table, poly_lon, poly_lat, ids, region, category, area_sqkm = generate_polygons.build_polygons(
             config["count"], config["vertices"], seed=config["seed"]
         )
@@ -114,6 +128,8 @@ def _build(config: dict, on_progress=None):
             path, poly_lon, poly_lat, ids, region, category, area_sqkm
         )
     if kind == "generated_table":
+        if on_log:
+            on_log(f"Generating {config['rows']:,} synthetic rows (seed={config['seed']}, geo={config['geo']})")
         table = generate_data.build_table(config["rows"], seed=config["seed"], geo=config["geo"])
         return table, None
     raise ValueError(f"Unknown dataset kind: {kind!r}")
@@ -179,27 +195,51 @@ def run_refresh(
     tmp_mbtiles = tiles_dataset_dir / f".tmp-{version}.mbtiles"
     final_mbtiles = tiles_dataset_dir / f"{version}.mbtiles"
 
+    log_cb = lambda msg: db.append_log(con, name, version, msg)  # noqa: E731
     fetch_progress = _throttled(lambda cur, tot: db.set_progress(con, name, version, cur, tot))
-    tiling_progress = _throttled(lambda cur, tot: db.set_progress(con, name, version, cur, tot))
+    # Tiling's progress ticks come from tippecanoe's own percentage line,
+    # which can update many times a second — piggyback the log line on the
+    # same once-a-second throttle rather than firing it separately, so the
+    # log doesn't fill up with 200 near-identical "62.3%… 62.4%… 62.5%" rows.
+    def _tiling_tick(cur, tot):
+        db.set_progress(con, name, version, cur, tot)
+        log_cb(f"Tiling: {cur:.0f}% complete")
+
+    tiling_progress = _throttled(_tiling_tick)
 
     try:
+        log_cb(f"Starting refresh (kind={config['kind']}, version={version})")
         print(f"[{name}] fetching/generating version {version}...")
-        table, write_geojson = _build(config, on_progress=fetch_progress if config["kind"] == "arcgis" else None)
+        table, write_geojson = _build(
+            config,
+            on_progress=fetch_progress if config["kind"] == "arcgis" else None,
+            on_log=log_cb,
+        )
         pq.write_table(table, tmp_parquet, compression="zstd")
         row_count = _validate_parquet(tmp_parquet)
+        log_cb(f"Parquet written and validated: {row_count:,} rows")
 
         if is_polygon:
             db.set_status(con, name, version, "tiling")
             write_geojson(tmp_geojson)
             print(f"[{name}] tiling with tippecanoe...")
+            # -zg guesses maxzoom from feature count/density, not physical
+            # feature size — wrong call for a dataset of many small polygons
+            # (see registry.py's "max_zoom (optional)" docstring for the OA
+            # incident this came from: -zg picked 9, four zooms too coarse,
+            # and tippecanoe silently substituted placeholder squares for
+            # every sub-pixel polygon). A dataset can override it explicitly.
+            zoom_flag = f"-z{config['max_zoom']}" if config.get("max_zoom") else "-zg"
             _run_tippecanoe(
                 [
-                    "tippecanoe", "-o", str(tmp_mbtiles), "-zg",
+                    "tippecanoe", "-o", str(tmp_mbtiles), zoom_flag,
                     "--extend-zooms-if-still-dropping", "-l", name, "-f", str(tmp_geojson),
                 ],
                 on_progress=tiling_progress,
+                on_log=log_cb,
             )
             _validate_mbtiles(tmp_mbtiles)
+            log_cb("Tiling complete, .mbtiles validated")
 
         # Only now: files exist complete at .tmp names, validated. Move them
         # to their final names, then flip the registry pointer — the only
@@ -215,12 +255,15 @@ def run_refresh(
             parquet_path=str(final_parquet),
             mbtiles_path=str(final_mbtiles) if is_polygon else None,
         )
+        log_cb(f"Version {version} is now active ({row_count:,} rows)")
         print(f"[{name}] version {version} is now active ({row_count:,} rows).")
 
     except subprocess.CalledProcessError as e:
+        log_cb(f"FAILED: tippecanoe error: {e.output[:500]}")
         db.fail_job(con, name, version, f"tippecanoe failed: {e.output[:2000]}")
         print(f"[{name}] FAILED: tippecanoe error: {e.output}")
     except Exception as e:
+        log_cb(f"FAILED: {e}")
         db.fail_job(con, name, version, str(e)[:2000])
         print(f"[{name}] FAILED: {e}")
     finally:
