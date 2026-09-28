@@ -84,6 +84,7 @@ const RUNNING_STATUSES = new Set(["fetching", "validating", "tiling"]);
 function DatasetRefreshControl({ name, hasTiles, status, onStartRefresh, onReopenRefresh, onRefreshed }) {
   const [showVersions, setShowVersions] = useState(false);
   const [versions, setVersions] = useState(null);
+  const [confirmingRefresh, setConfirmingRefresh] = useState(false);
 
   useEffect(() => {
     if (!showVersions) return;
@@ -94,6 +95,17 @@ function DatasetRefreshControl({ name, hasTiles, status, onStartRefresh, onReope
 
   const startRefresh = (e) => {
     e.stopPropagation();
+    setConfirmingRefresh(true);
+  };
+
+  const cancelRefresh = (e) => {
+    e.stopPropagation();
+    setConfirmingRefresh(false);
+  };
+
+  const confirmRefresh = (e) => {
+    e.stopPropagation();
+    setConfirmingRefresh(false);
     onStartRefresh(name);
   };
 
@@ -171,6 +183,32 @@ function DatasetRefreshControl({ name, hasTiles, status, onStartRefresh, onReope
               </button>
             ))
           )}
+        </div>
+      )}
+      {confirmingRefresh && (
+        <div className="refresh-modal-backdrop" onClick={cancelRefresh}>
+          <div
+            className="refresh-modal"
+            role="dialog"
+            aria-label={`Confirm refresh of ${name}`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="refresh-modal-head">
+              <span className="refresh-modal-title">Refresh {name}?</span>
+            </div>
+            <div className="refresh-modal-phase" style={{ fontWeight: 400 }}>
+              This re-fetches the full dataset{hasTiles ? " and re-tiles it" : ""} from source — it
+              can take several minutes, and the current version stays active until it finishes.
+            </div>
+            <div className="refresh-modal-actions">
+              <button className="refresh-modal-btn" onClick={cancelRefresh}>
+                Cancel
+              </button>
+              <button className="refresh-modal-btn primary" onClick={confirmRefresh}>
+                Refresh
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -269,6 +307,7 @@ export default function Sidebar({
   onStartRefresh,
   onReopenRefresh,
   onDatasetsUpdated,
+  highlightedDatasets,
 }) {
   const [open, setOpen] = useState({});
   const [width, setWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
@@ -335,7 +374,7 @@ export default function Sidebar({
 
         {datasets.map((ds) => (
           <div key={ds.name} className="tree-group">
-            <div className="tree-node">
+            <div className={`tree-node ${highlightedDatasets?.includes(ds.name) ? "ds-highlighted" : ""}`}>
               <button className="chevron" onClick={() => toggle(ds.name)}>
                 <ChevronIcon open={!!open[ds.name]} />
               </button>

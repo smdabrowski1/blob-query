@@ -4,6 +4,7 @@ import QueryEditor from "./components/QueryEditor.jsx";
 import ResultsGrid from "./components/ResultsGrid.jsx";
 import MapView from "./components/MapView.jsx";
 import RefreshModal from "./components/RefreshModal.jsx";
+import DiscoverChat from "./components/DiscoverChat.jsx";
 import {
   getDatasets,
   getHealth,
@@ -12,6 +13,7 @@ import {
   getRefreshStatus,
   getRefreshJobs,
   runQuery,
+  discoverChat,
   CHUNK,
 } from "./api";
 
@@ -23,6 +25,14 @@ LIMIT 5000;`;
 // A job legitimately in flight lives in this state — anything else (idle,
 // active, failed) is terminal and stops polling.
 const RUNNING_STATUSES = new Set(["fetching", "validating", "tiling"]);
+
+function ChatIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+    </svg>
+  );
+}
 
 export default function App() {
   const [datasets, setDatasets] = useState([]);
@@ -168,11 +178,14 @@ export default function App() {
           geometry: res.geometry,
           polygonSource: res.polygonSource,
           polygonZoom: res.polygonZoom,
+          choropleth: res.choropleth,
+          choroplethZoom: res.choroplethZoom,
+          choroplethSecondary: res.choroplethSecondary,
           baseTable: res.baseTable,
           initialRows: res.rows,
         });
         // Fall back to the table if the new result isn't mappable.
-        if (!res.geometry && !res.polygonSource) setResultTab("table");
+        if (!res.geometry && !res.polygonSource && !res.choropleth) setResultTab("table");
         setViewMode("query");
         setFullDatasetResult(null);
         setStatus("ok");
@@ -208,6 +221,9 @@ export default function App() {
         geometry: res.geometry,
         polygonSource: res.polygonSource,
         polygonZoom: res.polygonZoom,
+        choropleth: res.choropleth,
+        choroplethZoom: res.choroplethZoom,
+        choroplethSecondary: res.choroplethSecondary,
         initialRows: res.rows,
       });
     } catch (e) {
@@ -230,11 +246,81 @@ export default function App() {
     }
   }, []);
 
+  // Discovery chat — one conversation shared by the landing screen and the
+  // persistent side panel (DiscoverChat.jsx is the same component rendered
+  // in both places, against this same state), so dismissing the landing
+  // screen doesn't lose or restart it. Stateless on the server (like the
+  // existing "Ask AI" tab) — this array *is* the history, resent in full
+  // on every turn.
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatSending, setChatSending] = useState(false);
+  const [chatError, setChatError] = useState(null);
+  const [showLanding, setShowLanding] = useState(true);
+  const [chatPanelOpen, setChatPanelOpen] = useState(false);
+  // Datasets the chat most recently pointed at — Sidebar glows these rows
+  // so a suggestion in the chat has a visible landing spot in the tree, not
+  // just prose. Replaced wholesale by each new reply, not accumulated.
+  const [highlightedDatasets, setHighlightedDatasets] = useState([]);
+
+  const sendChatMessage = useCallback(
+    async (text) => {
+      const nextHistory = [...chatMessages, { role: "user", content: text }];
+      setChatMessages(nextHistory);
+      setChatSending(true);
+      setChatError(null);
+      try {
+        const { reply, suggestions } = await discoverChat(
+          nextHistory.map((m) => ({ role: m.role, content: m.content }))
+        );
+        setChatMessages((prev) => [...prev, { role: "assistant", content: reply, suggestions }]);
+        const mentioned = [...new Set(suggestions.flatMap((s) => s.datasets))];
+        if (mentioned.length) setHighlightedDatasets(mentioned);
+      } catch (e) {
+        setChatError(String(e.message || e));
+      } finally {
+        setChatSending(false);
+      }
+    },
+    [chatMessages]
+  );
+
+  // A suggestion chip's dataset click reuses the exact same "open" path a
+  // sidebar row click does (openDataset) — the chat is a second entry point
+  // into that, not a parallel one — plus dismissing the landing screen and
+  // keeping that dataset highlighted so its row is easy to find afterward.
+  const useSuggestedDataset = useCallback(
+    (name) => {
+      openDataset(name);
+      setHighlightedDatasets([name]);
+      setShowLanding(false);
+    },
+    [openDataset]
+  );
+
+  // A query suggestion lands in the editor for review, same as "Ask AI"
+  // generated SQL — never auto-run (see CLAUDE.md's natural-language SQL
+  // section for why: a second, silent execution path around the one Run
+  // button would undercut "generated SQL always lands in the tab for
+  // review").
+  const useSuggestedQuery = useCallback((sql, datasets) => {
+    setSql(sql);
+    setHighlightedDatasets(datasets || []);
+    setShowLanding(false);
+  }, []);
+
+  // Turning AI guide mode off is one action regardless of which control
+  // triggered it (the toggle button, or the panel's own × ) — see the JSX
+  // below for why both need to behave identically.
+  const closeChatPanel = useCallback(() => {
+    setChatPanelOpen(false);
+    setHighlightedDatasets([]);
+  }, []);
+
   const displayQuery =
     viewMode === "full" && fullDatasetResult
       ? { ...activeQuery, ...fullDatasetResult, id: `${activeQuery.id}-full` }
       : activeQuery;
-  const hasGeometry = !!(displayQuery?.geometry || displayQuery?.polygonSource);
+  const hasGeometry = !!(displayQuery?.geometry || displayQuery?.polygonSource || displayQuery?.choropleth);
 
   return (
     <div className="app">
@@ -247,9 +333,57 @@ export default function App() {
         onStartRefresh={startRefresh}
         onReopenRefresh={reopenJob}
         onDatasetsUpdated={setDatasets}
+        highlightedDatasets={highlightedDatasets}
       />
 
       <RefreshModal jobs={refreshJobs} onMinimize={minimizeJob} onDismiss={dismissJob} />
+
+      {showLanding && (
+        <div className="landing-overlay">
+          <div className="landing-panel">
+            <div className="landing-head">
+              <span className="landing-badge">AI Assistant</span>
+              <h1>Meet your data assistant</h1>
+            </div>
+            <DiscoverChat
+              variant="landing"
+              messages={chatMessages}
+              sending={chatSending}
+              error={chatError}
+              aiEnabled={aiEnabled}
+              onSend={sendChatMessage}
+              onOpenDataset={useSuggestedDataset}
+              onUseQuery={useSuggestedQuery}
+            />
+            <button className="landing-skip" onClick={() => setShowLanding(false)}>
+              Skip and go straight to the workbench
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!showLanding && (
+        <>
+          <div className={`chat-panel ${chatPanelOpen ? "open" : ""}`}>
+            <div className="chat-panel-head">
+              <span className="chat-panel-title">Discover</span>
+              <button className="icon-btn" onClick={closeChatPanel} aria-label="Close">
+                ×
+              </button>
+            </div>
+            <DiscoverChat
+              variant="panel"
+              messages={chatMessages}
+              sending={chatSending}
+              error={chatError}
+              aiEnabled={aiEnabled}
+              onSend={sendChatMessage}
+              onOpenDataset={useSuggestedDataset}
+              onUseQuery={useSuggestedQuery}
+            />
+          </div>
+        </>
+      )}
 
       <div className="main">
         <QueryEditor
@@ -346,6 +480,23 @@ export default function App() {
               <span className="sep">· {displayQuery.total?.toLocaleString()} rows</span>
             )}
             {elapsed != null && status !== "error" && <span className="sep">· {elapsed} ms</span>}
+            {/* Lives in the statusbar rather than floating over the map —
+                a fixed-position button had to dodge MapLibre's own bottom-
+                right attribution control, which got fiddly and still risked
+                colliding with it. Anchored in the app's own chrome instead,
+                it's never in the map's way at all. Same toggle either way
+                in — clicking this or the panel's own × both count as
+                turning AI guide mode off, so it reliably means "off", not
+                two subtly different kinds of closed; turning off also
+                clears any sidebar highlight a suggestion left behind. */}
+            <button
+              className={`chat-toggle-btn ${chatPanelOpen ? "active" : ""}`}
+              onClick={() => (chatPanelOpen ? closeChatPanel() : setChatPanelOpen(true))}
+              title={chatPanelOpen ? "Turn off AI guide" : "Turn on AI guide"}
+            >
+              <ChatIcon />
+              <span className="chat-toggle-label">{chatPanelOpen ? "AI Guide: On" : "AI Guide"}</span>
+            </button>
           </div>
         </div>
       </div>

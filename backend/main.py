@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import db as registry_db
-from engine import QueryEngine
+from engine import QueryEngine, _CODE_COLUMN_SOURCE
 from refresh import run_refresh
 from registry import DATASETS as DATASET_CONFIG
 
@@ -61,6 +61,37 @@ class NLQueryRequest(BaseModel):
 
 class SQLGeneration(BaseModel):
     sql: str
+
+
+class ChatMessage(BaseModel):
+    role: str  # "user" | "assistant"
+    content: str
+
+
+class DiscoverChatRequest(BaseModel):
+    # Full conversation so far, including the new user message as the last
+    # entry — this endpoint is stateless (like /api/nl-query), the client
+    # (App.jsx) is what accumulates history, the same "no browser storage,
+    # state lives in React" convention the rest of the frontend already
+    # follows. Sent fresh each turn rather than persisted server-side.
+    messages: list[ChatMessage]
+
+
+class Suggestion(BaseModel):
+    # "dataset": recommends opening one dataset (datasets holds just that
+    # one name). "query": proposes a concrete SELECT the user could run
+    # (datasets lists every table it references, sql holds the statement).
+    # A flat shape with an optional `sql` rather than a discriminated union
+    # — simpler for the model to reliably fill in via structured output.
+    type: str
+    label: str
+    datasets: list[str]
+    sql: str | None = None
+
+
+class DiscoverChatResponse(BaseModel):
+    reply: str
+    suggestions: list[Suggestion] = []
 
 
 def _schema_prompt() -> str:
@@ -292,6 +323,67 @@ def nl_query(req: NLQueryRequest):
             "Try rephrasing or simplifying the request.",
         )
     return {"sql": response.parsed_output.sql}
+
+
+@app.post("/api/discover-chat")
+def discover_chat(req: DiscoverChatRequest):
+    """Multi-turn "which dataset should I even look at" assistant — the
+    landing screen + persistent side panel in the frontend (App.jsx's
+    DiscoverChat). Distinct from /api/nl-query: that one turns a single
+    prompt straight into a SQL statement; this one has a conversation and
+    proposes concrete next steps (open a dataset, try a join) as structured
+    suggestions the UI renders as clickable chips, rather than requiring the
+    user to already know which table(s) they want."""
+    if ai_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="AI chat is not configured (set ANTHROPIC_API_KEY in backend/.env)",
+        )
+    if not req.messages:
+        raise HTTPException(status_code=400, detail="No messages provided")
+    try:
+        response = ai_client.messages.parse(
+            model=ANTHROPIC_MODEL,
+            max_tokens=16000,
+            system=(
+                "You are a data discovery assistant for a SQL query workbench called "
+                "BlobQuery. The user hasn't necessarily written any SQL yet — help them "
+                "figure out which dataset(s) are relevant to what they're curious about, "
+                "and how datasets could be joined together. You never run anything "
+                "yourself; you guide the user and propose concrete next steps.\n\n"
+                f"Available datasets:\n{_schema_prompt()}\n\n"
+                "Keep `reply` conversational and short (2-4 sentences), not an essay. "
+                "Populate `suggestions` with concrete next steps where relevant:\n"
+                "- type 'dataset': recommends opening one dataset to explore "
+                "(datasets: [that one name], sql: omit).\n"
+                "- type 'query': proposes one specific SELECT the user could run "
+                "(datasets: every table it references, sql: the full SELECT statement). "
+                "Only reference datasets/columns from the schema above — never invent "
+                "column names. A query suggestion must be a single valid DuckDB SELECT.\n\n"
+                "Map-ability: a query keeping one of these exact code columns in its "
+                "SELECT/GROUP BY (not just a name/label column) can be shown on a map "
+                "as a choropleth, even as an aggregate — "
+                + ", ".join(f"{col} ({ds})" for col, ds in _CODE_COLUMN_SOURCE.items())
+                + ". When an aggregate naturally groups by one of these datasets (e.g. "
+                "counting per district), prefer grouping by and selecting its code column "
+                "over its name column so the result stays mappable."
+            ),
+            messages=[{"role": m.role, "content": m.content} for m in req.messages],
+            output_format=DiscoverChatResponse,
+        )
+    except Exception as e:  # bad key, rate limit, network error, etc.
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if response.parsed_output is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The model didn't return a usable reply (stop_reason: {response.stop_reason}). "
+            "Try rephrasing.",
+        )
+    return {
+        "reply": response.parsed_output.reply,
+        "suggestions": [s.model_dump() for s in response.parsed_output.suggestions],
+    }
 
 
 @app.get("/api/health")

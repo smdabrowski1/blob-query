@@ -210,13 +210,27 @@ def run_refresh(
     try:
         log_cb(f"Starting refresh (kind={config['kind']}, version={version})")
         print(f"[{name}] fetching/generating version {version}...")
-        table, write_geojson = _build(
-            config,
-            on_progress=fetch_progress if config["kind"] == "arcgis" else None,
-            on_log=log_cb,
-        )
-        pq.write_table(table, tmp_parquet, compression="zstd")
-        row_count = _validate_parquet(tmp_parquet)
+
+        if config["kind"] == "arcgis" and not is_polygon:
+            # Large non-polygon ArcGIS sources (ONSPD postcodes: ~1.8M rows)
+            # stream straight to parquet instead of building one big
+            # in-memory Table first — measured at ~10MB of resident memory
+            # per page fetched, linearly, holding the whole dataset in
+            # memory (twice over: fetched JSON, then again as a Table) is
+            # what doesn't scale here, not the row count itself. See
+            # fetch_arcgis_table_to_parquet's docstring in sources/arcgis.py.
+            arcgis.fetch_arcgis_table_to_parquet(
+                config, tmp_parquet, on_progress=fetch_progress, on_log=log_cb
+            )
+            row_count = _validate_parquet(tmp_parquet)
+        else:
+            table, write_geojson = _build(
+                config,
+                on_progress=fetch_progress if config["kind"] == "arcgis" else None,
+                on_log=log_cb,
+            )
+            pq.write_table(table, tmp_parquet, compression="zstd")
+            row_count = _validate_parquet(tmp_parquet)
         log_cb(f"Parquet written and validated: {row_count:,} rows")
 
         if is_polygon:

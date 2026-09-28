@@ -26,3 +26,9 @@ services:
     env_file:
       - ./backend/.env
     restart: unless-stopped
+    # Enforced, not just a nice round number for the portfolio writeup — the
+    # streaming-fetch fix (see sources/arcgis.py / refresh.py's bounded
+    # in-flight window) keeps every refresh job well under this regardless
+    # of dataset size, so a real cap here is a live demonstration of that,
+    # not a risk of OOM-killing the app under normal use.
+    mem_limit: 4g

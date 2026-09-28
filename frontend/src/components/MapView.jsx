@@ -176,13 +176,210 @@ async function loadPolygonLayer(map, query, setSelectedFeature, highlightRef, is
   }
 }
 
+// A query with no `id` column (almost always: a GROUP BY aggregate, which
+// necessarily drops row identity) can still be shown on the map if it kept
+// one dataset's natural code column (engine.py's _detect_choropleth) —
+// colored by value instead of filtered by id, since there's no per-row
+// feature to filter to, only a per-group value to color by.
+function valueToColor(v, min, max) {
+  if (max === min) return "#0d9488";
+  const t = Math.max(0, Math.min(1, (v - min) / (max - min)));
+  const light = [224, 245, 243]; // pale teal
+  const dark = [13, 148, 136]; // --success
+  const [r, g, b] = light.map((c, i) => Math.round(c + (dark[i] - c) * t));
+  return `rgb(${r},${g},${b})`;
+}
+
+const NO_DATA_COLOR = "#e2e2e2";
+const CHOROPLETH_DEFAULT_OPACITY = 0.78;
+const CHOROPLETH_DIMMED_OPACITY = 0.35;
+const CHOROPLETH_DEFAULT_LINE_WIDTH = ["interpolate", ["linear"], ["zoom"], 4, 0.5, 12, 1.2];
+const CHOROPLETH_SELECTED_LINE_WIDTH = ["interpolate", ["linear"], ["zoom"], 4, 2, 12, 4];
+const CHOROPLETH_DEFAULT_LINE_COLOR = "rgba(20, 24, 28, 0.35)";
+
+async function loadChoroplethLayer(map, query, setSelectedFeature, setLegend, highlightRef, isCancelled) {
+  const { source: name, keyColumn, valueColumns } = query.choropleth;
+  const valueColumn = valueColumns[0];
+  const innerSql = query.sql.trim().replace(/;\s*$/, "");
+  const [minzoom, maxzoom] = query.choroplethZoom || [0, 14];
+
+  map.addSource("polygons", {
+    type: "vector",
+    tiles: [`${TILE_BASE}/tiles/${name}/{z}/{x}/{y}.pbf`],
+    minzoom,
+    maxzoom,
+  });
+  map.addLayer({
+    id: "polygons-fill",
+    type: "fill",
+    source: "polygons",
+    "source-layer": name,
+    paint: { "fill-color": NO_DATA_COLOR, "fill-opacity": CHOROPLETH_DEFAULT_OPACITY },
+  });
+  map.addLayer({
+    id: "polygons-outline",
+    type: "line",
+    source: "polygons",
+    "source-layer": name,
+    paint: {
+      "line-color": CHOROPLETH_DEFAULT_LINE_COLOR,
+      "line-width": CHOROPLETH_DEFAULT_LINE_WIDTH,
+    },
+  });
+
+  // The other tiled dataset this query actually joined against (if any) —
+  // shown as an outline-only overlay so a spatial join's result can be
+  // visually sanity-checked (do these boundaries really nest inside the
+  // ones being coloured?) instead of just trusted. Distinct dashed purple
+  // rather than reusing the primary outline's style specifically so the
+  // two are never confused for one thing at a glance. Visible by default —
+  // this is the whole point of the feature — toggleable via the legend.
+  if (query.choroplethSecondary) {
+    const secName = query.choroplethSecondary.source;
+    const [secMin, secMax] = query.choroplethSecondary.zoom || [0, 14];
+    map.addSource("choropleth-secondary", {
+      type: "vector",
+      tiles: [`${TILE_BASE}/tiles/${secName}/{z}/{x}/{y}.pbf`],
+      minzoom: secMin,
+      maxzoom: secMax,
+    });
+    map.addLayer({
+      id: "choropleth-secondary-outline",
+      type: "line",
+      source: "choropleth-secondary",
+      "source-layer": secName,
+      layout: { visibility: "visible" },
+      paint: {
+        "line-color": "#7c3aed",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.6, 12, 1.4],
+        "line-dasharray": [2, 1.5],
+        "line-opacity": 0.85,
+      },
+    });
+  }
+
+  // Same selection language as loadPolygonLayer's applySelection: dim every
+  // *other* polygon's fill and thicken the clicked one's border, so a click
+  // reads as clearly here as it does on any other polygon dataset — the
+  // fill *color* itself stays exactly what the data says regardless of
+  // selection, only opacity/outline change, since the color is the data.
+  const applySelection = (id) => {
+    if (id == null) {
+      map.setPaintProperty("polygons-fill", "fill-opacity", CHOROPLETH_DEFAULT_OPACITY);
+      map.setPaintProperty("polygons-outline", "line-color", CHOROPLETH_DEFAULT_LINE_COLOR);
+      map.setPaintProperty("polygons-outline", "line-width", CHOROPLETH_DEFAULT_LINE_WIDTH);
+      return;
+    }
+    const isSelected = ["==", ["get", "id"], id];
+    map.setPaintProperty(
+      "polygons-fill",
+      "fill-opacity",
+      ["case", isSelected, CHOROPLETH_DEFAULT_OPACITY, CHOROPLETH_DIMMED_OPACITY]
+    );
+    map.setPaintProperty(
+      "polygons-outline",
+      "line-color",
+      ["case", isSelected, "#ffb703", CHOROPLETH_DEFAULT_LINE_COLOR]
+    );
+    map.setPaintProperty(
+      "polygons-outline",
+      "line-width",
+      ["case", isSelected, CHOROPLETH_SELECTED_LINE_WIDTH, CHOROPLETH_DEFAULT_LINE_WIDTH]
+    );
+  };
+  highlightRef.clear = () => applySelection(null);
+
+  // Two independent lookups: the query's own aggregate rows (key -> value,
+  // and key -> the whole row, for identify) and every tiled feature's
+  // id -> key (a plain, un-filtered query against the source table itself —
+  // the aggregate result has no `id` to join on directly, only the natural
+  // code column both queries share).
+  let aggRows, aggCols, idKeyRows;
+  try {
+    const [aggRes, mapRes] = await Promise.all([
+      runQuery({ sql: innerSql, limit: 200_000 }),
+      runQuery({ sql: `SELECT id, ${keyColumn} FROM "${name}"`, limit: POLYGON_ID_LIMIT }),
+    ]);
+    aggRows = aggRes.rows;
+    aggCols = aggRes.columns;
+    idKeyRows = mapRes.rows;
+  } catch (err) {
+    console.warn("Map: couldn't build choropleth", err);
+    return;
+  }
+  if (isCancelled()) return;
+
+  const keyIdx = aggCols.findIndex((c) => c.name === keyColumn);
+  const valueIdx = aggCols.findIndex((c) => c.name === valueColumn);
+  const keyToValue = new Map();
+  const keyToRow = new Map();
+  for (const row of aggRows) {
+    keyToValue.set(row[keyIdx], row[valueIdx]);
+    keyToRow.set(row[keyIdx], row);
+  }
+
+  const numericValues = [...keyToValue.values()].filter((v) => typeof v === "number");
+  const min = numericValues.length ? Math.min(...numericValues) : 0;
+  const max = numericValues.length ? Math.max(...numericValues) : 0;
+
+  const idToKey = new Map();
+  const matchArgs = [];
+  for (const [id, key] of idKeyRows) {
+    idToKey.set(id, key);
+    const v = keyToValue.get(key);
+    if (typeof v === "number") matchArgs.push(id, valueToColor(v, min, max));
+  }
+  if (matchArgs.length) {
+    map.setPaintProperty("polygons-fill", "fill-color", ["match", ["get", "id"], ...matchArgs, NO_DATA_COLOR]);
+    // setPaintProperty alone left the map showing the flat placeholder
+    // color until some *other* interaction (a click, a pan) forced a
+    // repaint — the tiles for the current view had often already finished
+    // loading (and so already painted once) by the time this await chain
+    // resolved, and MapLibre doesn't always schedule a fresh frame purely
+    // off a style-only change to an idle map. Forcing one here is what
+    // actually makes the real colors appear the moment loading finishes,
+    // instead of needing the user to click first to "unstick" it.
+    map.triggerRepaint();
+  }
+  if (!isCancelled()) {
+    setLegend({ valueColumn, min, max, secondary: query.choroplethSecondary?.source || null });
+  }
+
+  map.on("click", "polygons-fill", (e) => {
+    const f = e.features[0];
+    const id = f.properties?.id;
+    applySelection(id);
+    const key = idToKey.get(id);
+    const row = key != null ? keyToRow.get(key) : null;
+    const title = f.properties?.name || f.properties?.lad_code || String(key ?? id ?? "Feature");
+    if (!row) {
+      setSelectedFeature({ title, rows: [{ key: "note", value: "No data for this feature" }], loading: false });
+      return;
+    }
+    setSelectedFeature({ title, rows: toRows(aggCols.map((c, i) => [c.name, row[i]])), loading: false });
+  });
+  map.on("mouseenter", "polygons-fill", () => (map.getCanvas().style.cursor = "pointer"));
+  map.on("mouseleave", "polygons-fill", () => (map.getCanvas().style.cursor = ""));
+}
+
 export default function MapView({ query }) {
   const containerRef = useRef(null);
   const [selectedFeature, setSelectedFeature] = useState(null);
+  const [legend, setLegend] = useState(null);
+  // True until whichever map layer this query needs has actually finished
+  // loading — the table can be showing rows well before that (it's driven
+  // by a separate, usually-faster fetch), so without this the map looked
+  // either broken or silently "done" during that gap.
+  const [mapLoading, setMapLoading] = useState(true);
+  const [secondaryVisible, setSecondaryVisible] = useState(true);
   // loadPolygonLayer attaches a .clear() here to reset the selection dim/highlight
   // — called from outside its closure (background click, panel's × button). A
   // ref since it drives MapLibre paint directly, not something React re-renders on.
   const highlightRef = useRef(null);
+  // Set once the map exists, read by the legend's "show <dataset> boundaries"
+  // toggle button below — a ref rather than state since flipping it drives
+  // MapLibre's own layout property directly, not a React re-render.
+  const mapRef = useRef(null);
 
   // Keyed by query.id at the parent, so this component remounts per query and
   // this effect runs once: build the map, then load points/polygons.
@@ -196,6 +393,7 @@ export default function MapView({ query }) {
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.addControl(new maplibregl.ScaleControl({ unit: "metric" }));
+    mapRef.current = map;
 
     let cancelled = false;
 
@@ -238,12 +436,24 @@ export default function MapView({ query }) {
         }
       });
 
-      if (query.polygonSource) {
-        await loadPolygonLayer(map, query, setSelectedFeature, highlightRef, () => cancelled);
-        return;
-      }
-
+      // Table results are typically already on screen well before the map's
+      // own fetches (id list, choropleth's two extra queries, ...) resolve
+      // — the loading overlay below is what makes that gap visible as "the
+      // map specifically is still working," rather than a plain grey/blank
+      // map that reads as either broken or already-finished. Covers every
+      // path (points/polygon-filter/choropleth) via one try/finally, not
+      // just choropleth, since the same gap exists for all three.
       try {
+        if (query.polygonSource) {
+          await loadPolygonLayer(map, query, setSelectedFeature, highlightRef, () => cancelled);
+          return;
+        }
+
+        if (query.choropleth) {
+          await loadChoroplethLayer(map, query, setSelectedFeature, setLegend, highlightRef, () => cancelled);
+          return;
+        }
+
         const res = await runQuery({ sql: query.sql, limit: MAP_LIMIT });
         if (cancelled) return;
 
@@ -272,19 +482,55 @@ export default function MapView({ query }) {
         map.getSource("points").setData({ type: "FeatureCollection", features });
         if (features.length) map.fitBounds(bounds, { padding: 56, maxZoom: 11, duration: 0 });
       } catch (e) {
-        if (!cancelled) console.error("Map: couldn't load points", e);
+        if (!cancelled) console.error("Map: couldn't load map layer", e);
+      } finally {
+        if (!cancelled) setMapLoading(false);
       }
     });
 
     return () => {
       cancelled = true;
+      mapRef.current = null;
       map.remove();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="mapview">
-      <div className="map-container" ref={containerRef} />
+      <div className={`map-container ${mapLoading ? "map-loading" : ""}`} ref={containerRef} />
+      {mapLoading && (
+        <div className="map-loading-overlay">
+          <div className="map-spinner" />
+        </div>
+      )}
+      {legend && (
+        <div className="map-legend">
+          <div className="map-legend-label">{legend.valueColumn}</div>
+          <div className="map-legend-bar" />
+          <div className="map-legend-scale">
+            <span>{legend.min.toLocaleString()}</span>
+            <span>{legend.max.toLocaleString()}</span>
+          </div>
+          {legend.secondary && (
+            <button
+              className={`map-legend-toggle ${secondaryVisible ? "active" : ""}`}
+              onClick={() => {
+                const next = !secondaryVisible;
+                setSecondaryVisible(next);
+                mapRef.current?.setLayoutProperty(
+                  "choropleth-secondary-outline",
+                  "visibility",
+                  next ? "visible" : "none"
+                );
+              }}
+              title={`${secondaryVisible ? "Hide" : "Show"} ${legend.secondary} boundaries — use this to check the join lines up`}
+            >
+              <span className="map-legend-toggle-swatch" />
+              {legend.secondary} boundaries
+            </button>
+          )}
+        </div>
+      )}
       <div className={`feature-panel ${selectedFeature ? "open" : ""}`}>
         {selectedFeature && (
           <>

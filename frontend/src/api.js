@@ -48,6 +48,23 @@ export async function generateSql({ prompt }) {
   return (await r.json()).sql;
 }
 
+// Multi-turn discovery chat — distinct from generateSql above (one prompt ->
+// one SQL statement). Stateless server-side, same as generateSql: the full
+// conversation (messages: [{role, content}, ...]) is sent every call, and
+// the caller (App.jsx) is what accumulates history in React state.
+export async function discoverChat(messages) {
+  const r = await fetch(`${BASE}/api/discover-chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(body.detail || "Discovery chat failed");
+  }
+  return r.json(); // { reply, suggestions: [{type, label, datasets, sql}] }
+}
+
 export async function refreshDatasets() {
   const r = await fetch(`${BASE}/api/datasets/refresh`, { method: "POST" });
   if (!r.ok) throw new Error("Failed to refresh datasets");

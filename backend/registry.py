@@ -34,6 +34,19 @@ arcgis-specific:
   tile_fields: subset of field_mapping's keys (plus "id") to bake into the
     vector tile's properties — kept small on purpose; the rest is available
     via the parquet, fetched by id on click (see MapView.jsx's identify panel)
+    Meaningless (leave as []) when `polygon` is False — there's no tileset
+    for a non-polygon dataset to bake tile-only properties into.
+  code_column (optional): this dataset's natural, unique-per-row code column
+    (e.g. "lad_code"). Drives choropleth detection (engine.py's
+    _detect_choropleth): a query result that keeps a column with exactly
+    this name — typically a GROUP BY on it, e.g. "SELECT lad_code,
+    count(*) ... GROUP BY lad_code" — gets offered as a colour-by-value map
+    even though it has no `id` column and isn't the polygon-filter case
+    _detect_polygon_source handles. Deliberately an *exact* column-name
+    match, not a fuzzy one on e.g. "name" — every tiled dataset has a
+    "name"-ish column, so matching on that couldn't tell which dataset a
+    join's result should color against. Omit for a dataset with no natural
+    code (land_parcels' polygons are synthetic, id is all there is).
 
 generated_table-specific (backend/generate_data.py):
   rows, seed, geo
@@ -52,6 +65,15 @@ DATASETS = {
         ),
         "page_size": 25,
         "max_workers": 4,
+        # Full-BFE-resolution coastline geometry makes some pages far heavier
+        # than page_size alone suggests — a real 25-feature page at offset 300
+        # measured 75MB. sources/arcgis.py's MAX_PAGE_BYTES default (50MB,
+        # sized for postcodes' ~2.5MB pages) was rejecting these as if they
+        # were a runaway/hung response, failing every refresh at that offset.
+        # Override per-dataset here rather than raising the global default,
+        # which would blunt that cap's ability to catch an actual hang on
+        # lighter endpoints.
+        "max_page_bytes": 150 * 1024 * 1024,
         "field_mapping": {
             "lad_code": "LAD25CD",
             "name": "LAD25NM",
@@ -61,6 +83,7 @@ DATASETS = {
         },
         "float_fields": ["area_sqm", "perimeter_m"],
         "tile_fields": ["lad_code", "name"],
+        "code_column": "lad_code",
     },
     "msoa": {
         "kind": "arcgis",
@@ -82,6 +105,7 @@ DATASETS = {
         },
         "float_fields": ["area_sqm", "perimeter_m"],
         "tile_fields": ["msoa_code", "name"],
+        "code_column": "msoa_code",
     },
     "oa": {
         "kind": "arcgis",
@@ -127,6 +151,45 @@ DATASETS = {
         # (its parent geography, which *is* named) is the closest
         # human-readable label available when identifying one on the map.
         "tile_fields": ["oa_code", "lsoa_name"],
+        "code_column": "oa_code",
+    },
+    "postcodes": {
+        "kind": "arcgis",
+        "polygon": False,
+        # The "Live" table (current, non-terminated postcodes only —
+        # 1,810,364 of them, confirmed via returnCountOnly) rather than a
+        # dated quarterly snapshot (~2.7M, includes historical/terminated
+        # postcodes) — a current lookup table is what's actually useful
+        # here, not postcode history.
+        "feature_server": (
+            "https://services1.arcgis.com/ESMARspQHYMw9BZ9/arcgis/rest/services/"
+            "Online_ONS_Postcode_Directory_Live/FeatureServer/0/query"
+        ),
+        # Benchmarked directly (same rule as oa/msoa): maxRecordCount is
+        # 2000 and each 2000-row page is a lean ~1.2KB/row despite 57
+        # available source fields (most are short fixed-width codes) — the
+        # server's own page-size ceiling is the limit here, not payload
+        # weight, same situation as oa.
+        "page_size": 2000,
+        "max_workers": 4,
+        "field_mapping": {
+            "postcode": "PCDS",  # single-space "standard" form, e.g. "AB1 2CD" — not the fixed-width PCD7/PCD8
+            "oa_code": "OA21CD",  # matches this app's own `oa` dataset's oa_code exactly — a direct equi-join, no spatial join needed
+            "lsoa_code": "LSOA21CD",
+            "msoa_code": "MSOA21CD",  # matches `msoa`'s msoa_code exactly, same reasoning as oa_code above
+            "lad_code": "LAD26CD",  # Dec 2026 vintage — one year newer than uk_districts' LAD25CD; still useful, just not a guaranteed exact-code join against that dataset
+            "region_code": "RGN26CD",
+            "country_code": "CTRY26CD",
+            "constituency_code": "PCON24CD",
+            "ruc_code": "RUC21IND",
+            "imd_rank": "IMD25IND",  # Index of Multiple Deprivation rank — the actual "explore deprivation" data this app didn't have before
+            "date_introduced": "DOINTR",
+            "lat": "LAT",
+            "lon": "LONG",
+        },
+        "float_fields": ["lat", "lon", "imd_rank"],
+        # No tileset for a point dataset this large — see "polygon" above.
+        "tile_fields": [],
     },
     "land_parcels": {
         "kind": "generated_polygons",

@@ -53,6 +53,15 @@ def _json_safe(v: Any) -> Any:
 _LAT_NAMES = ("lat", "latitude")
 _LON_NAMES = ("lon", "lng", "long", "longitude")
 
+_NUMERIC_TYPE_RE = re.compile(r"INT|DECIMAL|DOUBLE|FLOAT|REAL|NUMERIC|HUGEINT", re.IGNORECASE)
+
+# {code_column: dataset_name} for every dataset that declares one in
+# registry.py — e.g. {"lad_code": "uk_districts", "msoa_code": "msoa"}.
+# Built once at import time since registry.py's config is static.
+_CODE_COLUMN_SOURCE = {
+    cfg["code_column"]: name for name, cfg in DATASET_CONFIG.items() if cfg.get("code_column")
+}
+
 
 def _detect_geometry(columns: list[dict]) -> dict | None:
     """Return {'lat': <col>, 'lon': <col>} if the result has coordinate columns."""
@@ -62,16 +71,22 @@ def _detect_geometry(columns: list[dict]) -> dict | None:
     return {"lat": lat, "lon": lon} if lat and lon else None
 
 
-def _find_referenced_table(sql: str, names) -> str | None:
-    """Return the one name in `names` that appears as a FROM/JOIN target in
-    `sql` — or None if zero or more-than-one do (a join/subquery spanning
-    multiple known tables is ambiguous, not "pick the first match"). Name-based,
-    like _detect_geometry above — not a SQL parser."""
-    matches = [
+def _all_referenced_tables(sql: str, names) -> list[str]:
+    """Every name in `names` that appears as a FROM/JOIN target in `sql`,
+    in no particular order. Name-based, like _detect_geometry above — not a
+    SQL parser."""
+    return [
         name
         for name in names
         if re.search(rf"\b(from|join)\s+\"?{re.escape(name)}\"?\b", sql, re.IGNORECASE)
     ]
+
+
+def _find_referenced_table(sql: str, names) -> str | None:
+    """Return the one name in `names` that appears as a FROM/JOIN target in
+    `sql` — or None if zero or more-than-one do (a join/subquery spanning
+    multiple known tables is ambiguous, not "pick the first match")."""
+    matches = _all_referenced_tables(sql, names)
     return matches[0] if len(matches) == 1 else None
 
 
@@ -101,6 +116,37 @@ def _detect_polygon_source(sql: str, columns: list[dict], tiled_names: set[str])
         return None
     primary = _primary_from_table(sql)
     return primary if primary in tiled_names else None
+
+
+def _detect_choropleth(columns: list[dict], tiled_names: set[str]) -> dict | None:
+    """A query result that has no `id` column (so _detect_polygon_source
+    doesn't apply — most often because it's a GROUP BY aggregate, which
+    necessarily drops row identity) can still be mapped as a choropleth if
+    it kept one dataset's natural code column — e.g. `SELECT lad_code,
+    count(*) ... GROUP BY lad_code` still says "one row per district", even
+    though there's no `id` to filter tiles by directly. The frontend
+    resolves id<->code itself (a plain `SELECT id, <keyColumn> FROM
+    <source>` against the already-known table) and colors each tile by
+    matching its id through that map to this result's value.
+
+    Exactly one matching code column is required, same "ambiguous ->
+    don't guess" rule as _detect_polygon_source: two different datasets'
+    code columns both surviving into one result (e.g. a join projecting
+    both lad_code and msoa_code) means we don't know which one the query is
+    conceptually "about"."""
+    names = [c["name"] for c in columns]
+    matches = [(n, _CODE_COLUMN_SOURCE[n]) for n in names if n in _CODE_COLUMN_SOURCE]
+    if len(matches) != 1:
+        return None
+    key_column, source = matches[0]
+    if source not in tiled_names:
+        return None
+    value_columns = [
+        c["name"] for c in columns if c["name"] != key_column and _NUMERIC_TYPE_RE.search(c["type"])
+    ]
+    if not value_columns:
+        return None
+    return {"source": source, "keyColumn": key_column, "valueColumns": value_columns}
 
 
 class QueryEngine:
@@ -270,6 +316,28 @@ class QueryEngine:
         raw = cur.fetchall()
         rows = [[_json_safe(v) for v in row] for row in raw]
         polygon_source = _detect_polygon_source(sql, columns, self.tiled_dataset_names())
+        # Choropleth is the fallback map option, not the primary one — a
+        # query that already qualifies for the id-filtered polygon view
+        # (raw per-row selects) uses that path; choropleth only kicks in
+        # when polygon_source came back empty (typically: an aggregate,
+        # which has no `id` to filter tiles by in the first place).
+        choropleth = None if polygon_source else _detect_choropleth(columns, self.tiled_dataset_names())
+        # Whichever *other* tiled dataset(s) the query actually joined
+        # against, if any — lets the frontend offer their boundaries as a
+        # toggleable overlay so a spatial join's result can be visually
+        # sanity-checked (e.g. "do these MSOA outlines really nest inside
+        # the district I coloured?"), not just trusted blind. Purely
+        # name-based against whatever's in the query's own FROM/JOIN
+        # clauses and the registry's tiled datasets — applies to any query
+        # shaped this way, not special-cased to any one pair of datasets.
+        choropleth_secondary = None
+        if choropleth:
+            others = [
+                n for n in _all_referenced_tables(sql, self.tiled_dataset_names())
+                if n != choropleth["source"]
+            ]
+            if others:
+                choropleth_secondary = {"source": others[0], "zoom": self.tile_zoom_range(others[0])}
         return {
             "columns": columns,
             "rows": rows,
@@ -277,6 +345,9 @@ class QueryEngine:
             "geometry": _detect_geometry(columns),
             "polygonSource": polygon_source,
             "polygonZoom": self.tile_zoom_range(polygon_source) if polygon_source else None,
+            "choropleth": choropleth,
+            "choroplethZoom": self.tile_zoom_range(choropleth["source"]) if choropleth else None,
+            "choroplethSecondary": choropleth_secondary,
             # Which known dataset (if exactly one, unambiguously) this query
             # targets — lets the frontend offer a "full table" peek alongside
             # the query's own result. None for joins/subqueries spanning
