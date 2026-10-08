@@ -230,7 +230,15 @@ def set_column_description(con: sqlite3.Connection, dataset_name: str, column_na
     way (falls back to no description), so there's no reason to keep a row
     with nothing meaningful in it."""
     with con:
-        description = description.strip()
+        # Collapsed to one line and capped: this text gets spliced into the
+        # AI endpoints' system prompt verbatim (main.py's _schema_prompt),
+        # unauthenticated via this very endpoint — stripping newlines keeps
+        # a stored description from visually impersonating a new prompt
+        # line/section, and the length cap keeps one description from
+        # dominating the prompt with injected text. Doesn't make the content
+        # trustworthy on its own; _schema_prompt's own framing is what tells
+        # the model to treat this as data, not instructions.
+        description = " ".join(description.split())[:300]
         if not description:
             con.execute(
                 "DELETE FROM column_descriptions WHERE dataset_name=? AND column_name=?",

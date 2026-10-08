@@ -149,6 +149,38 @@ def _detect_choropleth(columns: list[dict], tiled_names: set[str]) -> dict | Non
     return {"source": source, "keyColumn": key_column, "valueColumns": value_columns}
 
 
+# DuckDB table functions (and statement keywords) that reach outside the
+# registered dataset views — local disk, the network, or the extension
+# loader. /api/query has no auth and run_query's SELECT-wrapping only
+# blocks multi-statement/DDL smuggling, not a table function called *inside*
+# a single SELECT: confirmed live that `SELECT * FROM read_text('/app/main.py')`
+# returns real source off disk, and the same call against an https:// URL
+# performs an arbitrary outbound fetch (SSRF) — in a cloud deployment that
+# could reach a cloud metadata endpoint. A bare `FROM 'path'` without one of
+# these function names doesn't bypass this: confirmed DuckDB's replacement
+# scan still requires a recognized extension and routes through the same
+# readers, so blocking the function names is sufficient, not just the first
+# layer. Datasets are only ever meant to be queried by their registered view
+# name (see module docstring), so none of this removes real functionality.
+_FS_FUNCTION_BLOCKLIST = re.compile(
+    r"\b("
+    r"read_csv\w*|read_parquet|parquet_scan|read_json\w*|read_ndjson\w*|"
+    r"read_text|read_blob|glob|sniff_csv|"
+    r"attach|detach|copy|install|load|export|import|pragma_\w*"
+    r")\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _reject_filesystem_access(sql: str) -> None:
+    m = _FS_FUNCTION_BLOCKLIST.search(sql)
+    if m:
+        raise ValueError(
+            f"'{m.group(1)}' is not allowed here — queries may only reference the "
+            "registered datasets listed in the sidebar, not read files or URLs directly."
+        )
+
+
 class QueryEngine:
     def __init__(
         self,
@@ -291,6 +323,7 @@ class QueryEngine:
         sql = sql.strip().rstrip(";")
         if not sql:
             raise ValueError("Empty query.")
+        _reject_filesystem_access(sql)
 
         # Fresh cursor per call — see the comment in list_datasets(); the
         # shared connection isn't safe across FastAPI's threadpool-concurrent

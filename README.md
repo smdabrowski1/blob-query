@@ -4,6 +4,13 @@ A minimal SQL query workbench over parquet files. **DuckDB** does the querying,
 **FastAPI** serves it, and a **React + Glide Data Grid** frontend renders results
 with a windowed grid that scrolls millions of rows without loading them all.
 
+Since the initial version, this has grown AI-assisted natural-language SQL
+and a discovery chat, dataset refresh/versioning against live UK government
+geography APIs, and map choropleths — see `CHANGELOG.md` for the history and
+`CLAUDE.md` for how it all fits together. `CLAUDE.md` also has a `Security`
+section worth reading before pointing this at anything other than localhost:
+no authentication, by design, for a local single-user demo.
+
 Each parquet file in `backend/data/` is auto-registered as a queryable view named
 after the file, so you write `SELECT * FROM sales_events` just like a table in SSMS.
 
