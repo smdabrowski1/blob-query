@@ -1,13 +1,10 @@
 """
-Generic refresh orchestrator. Looks up a dataset in registry.py, dispatches
-to the right builder for its `kind`, writes everything to `.tmp-*` names,
-validates what was written, and only then makes it live — see the
-module-level docstring in db.py for why the "make it live" step is a single
-SQLite transaction rather than a hand-rolled file-pointer dance.
+Refresh orchestrator. Looks up a dataset in registry.py, dispatches to the
+right builder for its `kind`, writes everything to `.tmp-*` names, validates
+what was written, and only then makes it live via db.activate_version().
 
-A refresh that fails or is interrupted at any point before the final
-`db.activate_version()` call leaves the previously-active version completely
-untouched — nothing before that call is ever read by the running app.
+A refresh that fails or is interrupted before that final call leaves the
+previously-active version untouched.
 """
 from __future__ import annotations
 
@@ -41,9 +38,9 @@ def _new_version() -> str:
 
 def _throttled(fn, min_interval=1.0):
     """Wrap a progress callback so it fires at most once per min_interval
-    seconds — msoa's 49 concurrent page fetches (or tippecanoe's rapid
-    percentage updates) would otherwise hit SQLite with near-simultaneous
-    writes for a value that's purely informational anyway."""
+    seconds — msoa's concurrent page fetches (and tippecanoe's rapid percent
+    updates) would otherwise hammer SQLite with writes for a purely
+    informational value."""
     last = [0.0]
 
     def wrapped(current, total):
@@ -56,18 +53,15 @@ def _throttled(fn, min_interval=1.0):
 
 
 def _run_tippecanoe(cmd: list[str], on_progress, on_log=None) -> None:
-    """Runs tippecanoe as a streaming subprocess instead of run-and-wait, so
-    its progress meter (single-line, carriage-return-updated output like
-    ` 50.0%  7/64/41` — not one line per update) can be parsed as it happens.
-    Stdout+stderr are merged: it isn't certain which stream the meter uses,
-    and merging sidesteps the question. Reads one character at a time to
-    correctly split on '\\r' as well as '\\n'.
+    """Runs tippecanoe as a streaming subprocess so its progress meter
+    (single-line, carriage-return-updated, like ` 50.0%  7/64/41`) can be
+    parsed as it happens. Stdout+stderr merged since it's unclear which
+    stream the meter uses. Reads one character at a time to split on '\\r'
+    as well as '\\n'.
 
-    Lines that aren't a bare percentage tick (tippecanoe also prints real
-    status lines — e.g. what it inferred about the input, per-layer feature
-    counts) are forwarded to on_log verbatim, same as arcgis.py's per-page
-    lines — this is what actually makes the job's log read like tippecanoe's
-    own terminal output rather than just a percentage counter."""
+    Non-percentage lines (tippecanoe's real status output — what it
+    inferred about the input, per-layer counts) get forwarded to on_log
+    verbatim, so the job log reads like tippecanoe's own terminal output."""
     if on_log:
         on_log(f"Running: {' '.join(cmd)}")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -104,16 +98,14 @@ def _clear_stale_tmp(dataset_dir: Path, tiles_dataset_dir: Path) -> None:
 
 
 def _build(config: dict, on_progress=None, on_log=None):
-    """Dispatch on kind. Each builder has a genuinely different return shape
-    (they predate this orchestrator and are proven working) — normalized
-    here rather than forced into a fake common interface. Returns
-    (pyarrow.Table, geojson_write_fn | None), where geojson_write_fn(path)
-    writes the tippecanoe input if this is a polygon dataset.
+    """Dispatch on kind. Each builder predates this orchestrator with its
+    own return shape, normalized here. Returns (pyarrow.Table,
+    geojson_write_fn | None); geojson_write_fn(path) writes the tippecanoe
+    input for polygon datasets.
 
-    on_progress is only meaningful for kind == "arcgis" — the generated
-    kinds run entirely in-process, fast enough that there's no meaningful
-    "which call are we on" to report; on_log still gets a single line so the
-    modal isn't blank while that runs."""
+    on_progress only matters for kind == "arcgis" — the generated kinds run
+    in-process and finish too fast to report meaningful progress, but still
+    log one line so the modal isn't blank."""
     kind = config["kind"]
     if kind == "arcgis":
         table, geojson_dict = arcgis.fetch_arcgis_dataset(config, on_progress=on_progress, on_log=on_log)
@@ -162,11 +154,9 @@ def run_refresh(
     registry_db_path: Path | None = None,
 ) -> None:
     """data_dir/tiles_dir/registry_db_path default to this module's constants
-    (fine for standalone/CLI use) but should be passed explicitly by callers
-    that already have their own configured paths (main.py reads these from
-    DATA_DIR/TILES_DIR/REGISTRY_DB env vars — a refresh job must land in the
-    same place the running app is actually reading from, not silently fall
-    back to a different default)."""
+    (fine for standalone/CLI use); main.py passes its own env-configured
+    paths explicitly so a refresh lands where the running app actually reads
+    from."""
     if name not in DATASETS:
         raise ValueError(f"Unknown dataset: {name!r}")
     config = DATASETS[name]
@@ -212,13 +202,9 @@ def run_refresh(
         print(f"[{name}] fetching/generating version {version}...")
 
         if config["kind"] == "arcgis" and not is_polygon:
-            # Large non-polygon ArcGIS sources (ONSPD postcodes: ~1.8M rows)
-            # stream straight to parquet instead of building one big
-            # in-memory Table first — measured at ~10MB of resident memory
-            # per page fetched, linearly, holding the whole dataset in
-            # memory (twice over: fetched JSON, then again as a Table) is
-            # what doesn't scale here, not the row count itself. See
-            # fetch_arcgis_table_to_parquet's docstring in sources/arcgis.py.
+            # Large non-polygon sources (ONSPD postcodes: ~1.8M rows) stream
+            # straight to parquet instead of building one big in-memory
+            # Table — see fetch_arcgis_table_to_parquet's docstring.
             arcgis.fetch_arcgis_table_to_parquet(
                 config, tmp_parquet, on_progress=fetch_progress, on_log=log_cb
             )
@@ -238,11 +224,10 @@ def run_refresh(
             write_geojson(tmp_geojson)
             print(f"[{name}] tiling with tippecanoe...")
             # -zg guesses maxzoom from feature count/density, not physical
-            # feature size — wrong call for a dataset of many small polygons
-            # (see registry.py's "max_zoom (optional)" docstring for the OA
-            # incident this came from: -zg picked 9, four zooms too coarse,
-            # and tippecanoe silently substituted placeholder squares for
-            # every sub-pixel polygon). A dataset can override it explicitly.
+            # feature size — wrong for a dataset of many small polygons (see
+            # registry.py's "max_zoom" docstring: it picked 9 for OA, four
+            # zooms too coarse, so tippecanoe substituted placeholder squares
+            # for every sub-pixel polygon). Datasets can override it.
             zoom_flag = f"-z{config['max_zoom']}" if config.get("max_zoom") else "-zg"
             _run_tippecanoe(
                 [

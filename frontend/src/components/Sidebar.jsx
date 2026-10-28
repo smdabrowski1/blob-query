@@ -7,10 +7,8 @@ const DEFAULT_SIDEBAR_WIDTH = 300;
 const MIN_SIDEBAR_WIDTH = 240;
 const MAX_SIDEBAR_WIDTH = 640;
 
-// A plain chevron glyph (▸/▾) rendered close to invisible in the self-hosted
-// Inter build this app uses — an SVG stroke icon renders identically
-// regardless of font/glyph coverage, and reads as "light" (thin stroke)
-// rather than a filled triangle glyph the way a font character would.
+// SVG stroke icon instead of a ▸/▾ glyph — renders identically regardless
+// of font coverage, and reads as a lighter thin stroke.
 function ChevronIcon({ open }) {
   return (
     <svg
@@ -29,11 +27,9 @@ function ChevronIcon({ open }) {
   );
 }
 
-// Brand mark: an abstract "blob" — literal nod to the name (BlobQuery), and
-// distinct from a generic database-cylinder icon that'd read as "just any
-// SQL tool" rather than this app's actual point (querying data that lives
-// in blob storage — S3/Azure Blob — not just local files; see engine.py's
-// storage-agnostic design).
+// Brand mark: an abstract "blob", a nod to BlobQuery — deliberately not a
+// generic database-cylinder icon, since the point is querying blob storage
+// (S3/Azure), not just local files.
 function BrandIcon() {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
@@ -45,12 +41,9 @@ function BrandIcon() {
   );
 }
 
-// The standard Material Design "refresh" glyph — a filled shape (fill, no
-// stroke), not built from arcs/chevrons by hand like the earlier attempts
-// here, which kept coming out mis-shaped or mis-sized. It naturally fills
-// roughly the same 16×15px footprint of its 24x24 grid as HistoryIcon's own
-// r=8 circle does, so rendering both at the same width/height keeps them
-// visually matched without needing hand-tuned geometry to line up.
+// Standard Material Design "refresh" glyph. Fills roughly the same
+// footprint as HistoryIcon's r=8 circle, so the two stay visually matched
+// at the same width/height.
 function RefreshIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
@@ -78,9 +71,9 @@ const PHASE_LABEL = {
 
 const RUNNING_STATUSES = new Set(["fetching", "validating", "tiling"]);
 
-// Job status/progress now lives in App.jsx (refreshJobs), not here — it has
-// to outlive this row (minimized modal, page reload) which a per-row poll
-// can't do. This component just renders whatever slice App hands it.
+// Job status/progress lives in App.jsx (refreshJobs), not here — it needs
+// to outlive this row (minimized modal, page reload). This just renders
+// whatever slice App hands it.
 function DatasetRefreshControl({ name, hasTiles, status, onStartRefresh, onReopenRefresh, onRefreshed }) {
   const [showVersions, setShowVersions] = useState(false);
   const [versions, setVersions] = useState(null);
@@ -215,11 +208,9 @@ function DatasetRefreshControl({ name, hasTiles, status, onStartRefresh, onReope
   );
 }
 
-// Descriptions feed the "Ask AI" NL->SQL prompt (see main.py's
-// _schema_prompt) — this is the editor for them. Keyed by (dataset, column)
-// server-side, not by version, so a value set here survives every future
-// refresh of this dataset automatically; it only changes when someone edits
-// it again here.
+// Descriptions feed the "Ask AI" NL->SQL prompt (main.py's _schema_prompt).
+// Keyed by (dataset, column) server-side, not by version, so they survive
+// future refreshes automatically.
 function ColumnRow({ datasetName, column, onInsertColumn, onDatasetsUpdated }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(column.description || "");
@@ -315,11 +306,8 @@ export default function Sidebar({
 
   const toggle = (name) => setOpen((o) => ({ ...o, [name]: !o[name] }));
 
-  // Drag-to-resize from the sidebar's right edge. Width is plain component
-  // state, not persisted (localStorage) — consistent with the rest of the
-  // frontend not depending on browser storage; it just resets to the
-  // default on reload, same as every other view preference here (open/
-  // closed dataset rows, active result tab, etc.).
+  // Drag-to-resize from the sidebar's right edge. Plain component state,
+  // not persisted — resets on reload like every other view preference here.
   const startResize = useCallback((e) => {
     e.preventDefault();
     draggingRef.current = true;

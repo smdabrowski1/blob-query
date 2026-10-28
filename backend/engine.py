@@ -84,19 +84,17 @@ def _all_referenced_tables(sql: str, names) -> list[str]:
 
 def _find_referenced_table(sql: str, names) -> str | None:
     """Return the one name in `names` that appears as a FROM/JOIN target in
-    `sql` — or None if zero or more-than-one do (a join/subquery spanning
-    multiple known tables is ambiguous, not "pick the first match")."""
+    `sql`, or None if zero or more than one do (ambiguous, not "pick the
+    first")."""
     matches = _all_referenced_tables(sql, names)
     return matches[0] if len(matches) == 1 else None
 
 
 def _primary_from_table(sql: str) -> str | None:
-    """The first FROM target in `sql` — the "driving" table whose shape the
-    result usually takes, even when other tables are JOINed in purely to
-    filter (e.g. a spatial join: `FROM msoa m JOIN uk_districts d ON
-    ST_Intersects(...)` is still an msoa-shaped result). Name-based, like
-    _detect_geometry above — not a SQL parser, so a subquery/CTE as the
-    primary FROM target just won't match anything, same as before."""
+    """The first FROM target in `sql` — the "driving" table, even when
+    other tables are JOINed in only to filter (e.g. `FROM msoa m JOIN
+    uk_districts d ON ST_Intersects(...)` is still msoa-shaped). Name-based,
+    so a subquery/CTE as the primary target just won't match."""
     m = re.search(r'\bfrom\s+"?(\w+)"?', sql, re.IGNORECASE)
     return m.group(1) if m else None
 
@@ -119,21 +117,15 @@ def _detect_polygon_source(sql: str, columns: list[dict], tiled_names: set[str])
 
 
 def _detect_choropleth(columns: list[dict], tiled_names: set[str]) -> dict | None:
-    """A query result that has no `id` column (so _detect_polygon_source
-    doesn't apply — most often because it's a GROUP BY aggregate, which
-    necessarily drops row identity) can still be mapped as a choropleth if
-    it kept one dataset's natural code column — e.g. `SELECT lad_code,
-    count(*) ... GROUP BY lad_code` still says "one row per district", even
-    though there's no `id` to filter tiles by directly. The frontend
-    resolves id<->code itself (a plain `SELECT id, <keyColumn> FROM
-    <source>` against the already-known table) and colors each tile by
-    matching its id through that map to this result's value.
+    """A result with no `id` column (typically a GROUP BY aggregate) can
+    still be mapped as a choropleth if it kept one dataset's natural code
+    column — e.g. `SELECT lad_code, count(*) ... GROUP BY lad_code` is still
+    one row per district. The frontend resolves id<->code itself and colors
+    each tile by matching through that map.
 
-    Exactly one matching code column is required, same "ambiguous ->
-    don't guess" rule as _detect_polygon_source: two different datasets'
-    code columns both surviving into one result (e.g. a join projecting
-    both lad_code and msoa_code) means we don't know which one the query is
-    conceptually "about"."""
+    Requires exactly one matching code column, same ambiguity rule as
+    _detect_polygon_source — a join projecting both lad_code and msoa_code
+    doesn't tell us which the query is conceptually about."""
     names = [c["name"] for c in columns]
     matches = [(n, _CODE_COLUMN_SOURCE[n]) for n in names if n in _CODE_COLUMN_SOURCE]
     if len(matches) != 1:
@@ -149,19 +141,14 @@ def _detect_choropleth(columns: list[dict], tiled_names: set[str]) -> dict | Non
     return {"source": source, "keyColumn": key_column, "valueColumns": value_columns}
 
 
-# DuckDB table functions (and statement keywords) that reach outside the
-# registered dataset views — local disk, the network, or the extension
-# loader. /api/query has no auth and run_query's SELECT-wrapping only
-# blocks multi-statement/DDL smuggling, not a table function called *inside*
-# a single SELECT: confirmed live that `SELECT * FROM read_text('/app/main.py')`
-# returns real source off disk, and the same call against an https:// URL
-# performs an arbitrary outbound fetch (SSRF) — in a cloud deployment that
-# could reach a cloud metadata endpoint. A bare `FROM 'path'` without one of
-# these function names doesn't bypass this: confirmed DuckDB's replacement
-# scan still requires a recognized extension and routes through the same
-# readers, so blocking the function names is sufficient, not just the first
-# layer. Datasets are only ever meant to be queried by their registered view
-# name (see module docstring), so none of this removes real functionality.
+# DuckDB table functions that reach outside the registered dataset views —
+# local disk, network, or the extension loader. run_query's SELECT-wrapping
+# only blocks multi-statement/DDL smuggling, not a table function called
+# inside a single SELECT: `SELECT * FROM read_text('/app/main.py')` reads
+# real source off disk, and the same call against an https:// URL is an
+# arbitrary outbound fetch (SSRF risk against cloud metadata endpoints). A
+# bare `FROM 'path'` without one of these names doesn't bypass this either —
+# DuckDB's replacement scan still routes through a recognized extension.
 _FS_FUNCTION_BLOCKLIST = re.compile(
     r"\b("
     r"read_csv\w*|read_parquet|parquet_scan|read_json\w*|read_ndjson\w*|"
@@ -192,16 +179,11 @@ class QueryEngine:
         self.tiles_dir = Path(tiles_dir) if tiles_dir else None
         self.registry_db_path = Path(registry_db_path) if registry_db_path else Path(__file__).parent / "registry.db"
         self.con = duckdb.connect(database=":memory:")
-        # Handy defaults; httpfs/azure loaded lazily only if a remote path is used.
         self.con.execute("SET enable_progress_bar = false;")
-        # Spatial extension: ST_Intersects, ST_Distance, etc. against the WKT
-        # `geometry` columns land_parcels/uk_districts/msoa already store —
-        # DuckDB doesn't ship this loaded by default. INSTALL fetches it once
-        # per environment (cached under ~/.duckdb after that, so this is only
-        # a real network call on a cold container/machine); LOAD attaches it
-        # to this connection every time. Best-effort: an offline first boot
-        # shouldn't take the whole app down over one missing extension — the
-        # rest of the app (and every non-spatial query) works fine without it.
+        # ST_Intersects/ST_Distance etc. against the WKT geometry columns the
+        # polygon datasets store. INSTALL caches under ~/.duckdb after the
+        # first run; best-effort since an offline first boot shouldn't take
+        # the app down over a missing extension.
         try:
             self.con.execute("INSTALL spatial; LOAD spatial;")
         except Exception as e:
@@ -213,11 +195,8 @@ class QueryEngine:
 
     # ---- dataset registration -------------------------------------------------
     def refresh(self) -> None:
-        """(Re)register the *current* version of every dataset in the
-        registry (registry.py's static config + registry.db's per-version
-        metadata) as a DuckDB view. A dataset with no active version yet
-        (never fetched/generated) is simply absent, same as a missing flat
-        file used to be before versioning existed."""
+        """(Re)register the current version of every dataset as a DuckDB
+        view. A dataset with no active version yet is simply absent."""
         cur = self.con.cursor()
         self._views.clear()
         self._mbtiles.clear()
@@ -254,11 +233,10 @@ class QueryEngine:
         return set(self._mbtiles.keys())
 
     def tile_zoom_range(self, view: str) -> tuple[int, int] | None:
-        """(minzoom, maxzoom) actually present in the current version's
-        .mbtiles, from its metadata table — tippecanoe's -zg picks these
-        automatically per run, so this must be read rather than assumed;
-        otherwise the frontend would request zooms beyond what's tiled and
-        get 404s instead of MapLibre's normal overzoom-from-maxzoom behaviour."""
+        """(minzoom, maxzoom) from the current version's .mbtiles metadata.
+        tippecanoe's -zg picks these per run, so read rather than assume —
+        otherwise the frontend requests zooms beyond what's tiled and gets
+        404s instead of MapLibre's normal overzoom behaviour."""
         if view in self._tile_zoom_cache:
             return self._tile_zoom_cache[view]
         mbtiles = self._mbtiles.get(view)
@@ -280,12 +258,9 @@ class QueryEngine:
         return zoom
 
     def list_datasets(self) -> list[dict]:
-        # A fresh cursor per call, not self.con directly: FastAPI runs sync
-        # routes on a thread pool, and DuckDB connections aren't safe for
-        # concurrent execute() calls from multiple threads — two requests
-        # racing on the shared connection was corrupting cursor state and
-        # surfacing as `fetchone()` returning None (backend looked "down" to
-        # the frontend when it was actually a 500 from this race).
+        # Fresh cursor per call — DuckDB connections aren't thread-safe for
+        # concurrent execute(), and FastAPI runs sync routes on a thread pool.
+        # Sharing self.con directly caused corrupted cursor state under load.
         cur = self.con.cursor()
         reg_con = registry_db.connect(self.registry_db_path)
         try:
@@ -325,14 +300,12 @@ class QueryEngine:
             raise ValueError("Empty query.")
         _reject_filesystem_access(sql)
 
-        # Fresh cursor per call — see the comment in list_datasets(); the
-        # shared connection isn't safe across FastAPI's threadpool-concurrent
-        # requests otherwise.
+        # Fresh cursor per call — see list_datasets().
         cur = self.con.cursor()
         total = None
         if sample:
-            # Representative random spread across the whole result — used by the
-            # map so a million-row scan plots an even sample, not the first N rows.
+            # Even spread across the whole result, not just the first N rows —
+            # used by the map so a million-row scan plots representatively.
             cur = cur.execute(
                 f"SELECT * FROM ({sql}) AS _sub USING SAMPLE reservoir({int(limit)} ROWS)"
             )
@@ -349,20 +322,13 @@ class QueryEngine:
         raw = cur.fetchall()
         rows = [[_json_safe(v) for v in row] for row in raw]
         polygon_source = _detect_polygon_source(sql, columns, self.tiled_dataset_names())
-        # Choropleth is the fallback map option, not the primary one — a
-        # query that already qualifies for the id-filtered polygon view
-        # (raw per-row selects) uses that path; choropleth only kicks in
-        # when polygon_source came back empty (typically: an aggregate,
-        # which has no `id` to filter tiles by in the first place).
+        # Choropleth is the fallback: only tried when polygon_source came back
+        # empty (typically an aggregate with no `id` to filter tiles by).
         choropleth = None if polygon_source else _detect_choropleth(columns, self.tiled_dataset_names())
-        # Whichever *other* tiled dataset(s) the query actually joined
-        # against, if any — lets the frontend offer their boundaries as a
-        # toggleable overlay so a spatial join's result can be visually
-        # sanity-checked (e.g. "do these MSOA outlines really nest inside
-        # the district I coloured?"), not just trusted blind. Purely
-        # name-based against whatever's in the query's own FROM/JOIN
-        # clauses and the registry's tiled datasets — applies to any query
-        # shaped this way, not special-cased to any one pair of datasets.
+        # Any *other* tiled dataset the query joined against — lets the
+        # frontend offer its boundaries as an overlay so a spatial join's
+        # result can be sanity-checked visually (e.g. do these MSOA outlines
+        # really nest inside the district I coloured?).
         choropleth_secondary = None
         if choropleth:
             others = [
@@ -381,10 +347,8 @@ class QueryEngine:
             "choropleth": choropleth,
             "choroplethZoom": self.tile_zoom_range(choropleth["source"]) if choropleth else None,
             "choroplethSecondary": choropleth_secondary,
-            # Which known dataset (if exactly one, unambiguously) this query
-            # targets — lets the frontend offer a "full table" peek alongside
-            # the query's own result. None for joins/subqueries spanning
-            # multiple known tables, or SQL that names none of them.
+            # The one known dataset this query targets, if unambiguous —
+            # lets the frontend offer a "full table" peek alongside results.
             "baseTable": _find_referenced_table(sql, self._views.keys()),
         }
 

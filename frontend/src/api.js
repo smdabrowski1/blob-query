@@ -10,14 +10,9 @@ export const TILE_BASE = BASE || window.location.origin;
 // Rows fetched per scroll window. Keep in sync with the grid's paging.
 export const CHUNK = 250;
 
-// The map's single-shot fetch needs *some* integer to send as the request's
-// `limit` field (the API has no "no limit" value) — this is that sentinel,
-// not a real cap. The query's own LIMIT (the sidebar's default `LIMIT 1000`,
-// or whatever a user explicitly types — including no LIMIT at all) is what
-// actually governs the result; this number just needs to be comfortably
-// above every dataset in the app (largest today: sales_events, 1,000,000
-// rows) so it never truncates anything itself. No sampling — plain first-N
-// of whatever the query returns.
+// The API has no "no limit" value, so this is a sentinel well above any
+// dataset in the app (largest today: sales_events, 1M rows) — the query's
+// own LIMIT is what actually governs the result.
 export const MAP_LIMIT = 10_000_000;
 
 // Same idea as MAP_LIMIT, for the polygon id-filter fetch.

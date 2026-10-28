@@ -14,19 +14,13 @@ arcgis-specific:
     module docstring for how these were picked — payload size, not just
     record count, is what determines a safe page size)
   max_zoom (optional): forces tippecanoe's `-z<N>` instead of letting `-zg`
-    guess it. `-zg` guesses from overall feature *count/density*, not how
-    physically small each feature is — fine for uk_districts/msoa (both
-    landed on 13 on their own), but a dataset of many genuinely tiny
-    polygons (OA: ~770m across, 26x msoa's feature count) can get guessed
-    a much lower maxzoom, under which each polygon is sub-pixel and
-    tippecanoe silently replaces it with a placeholder square (its "tiny
-    polygon" fallback) — real shape only reappears once you zoom in past
-    what the tiles actually contain, since MapLibre just overzooms/stretches
-    the coarse placeholder rather than requesting more tiles. If a new
-    dataset's polygons render as jagged/self-intersecting blobs at close
-    zoom, check the .mbtiles' maxzoom (backend/tiles/<name>/<version>.mbtiles,
-    sqlite `metadata` table) against a known-good one before assuming a code
-    bug — this is very likely why.
+    guess it. `-zg` guesses from feature count/density, not physical feature
+    size — fine for uk_districts/msoa (both landed on 13), but a dataset of
+    many tiny polygons (OA: ~770m across, 26x msoa's count) can get guessed
+    too low a maxzoom, under which tippecanoe substitutes placeholder
+    squares for sub-pixel polygons. If new polygons render as jagged blobs
+    at close zoom, check the .mbtiles' maxzoom (sqlite `metadata` table in
+    backend/tiles/<name>/<version>.mbtiles) against a known-good one first.
   field_mapping: {output_column: arcgis_property_name} — every output column
     except `id` (synthetic) and `geometry` (WKT, derived from the feature's
     geometry, not a property)
@@ -38,15 +32,13 @@ arcgis-specific:
     for a non-polygon dataset to bake tile-only properties into.
   code_column (optional): this dataset's natural, unique-per-row code column
     (e.g. "lad_code"). Drives choropleth detection (engine.py's
-    _detect_choropleth): a query result that keeps a column with exactly
-    this name — typically a GROUP BY on it, e.g. "SELECT lad_code,
-    count(*) ... GROUP BY lad_code" — gets offered as a colour-by-value map
-    even though it has no `id` column and isn't the polygon-filter case
-    _detect_polygon_source handles. Deliberately an *exact* column-name
-    match, not a fuzzy one on e.g. "name" — every tiled dataset has a
-    "name"-ish column, so matching on that couldn't tell which dataset a
-    join's result should color against. Omit for a dataset with no natural
-    code (land_parcels' polygons are synthetic, id is all there is).
+    _detect_choropleth): a result that keeps a column with exactly this
+    name — typically a GROUP BY, e.g. "SELECT lad_code, count(*) ... GROUP
+    BY lad_code" — gets offered as a colour-by-value map even with no `id`
+    column. Exact name match on purpose; every tiled dataset has a
+    "name"-ish column, so matching fuzzily couldn't tell which dataset a
+    join should color against. Omit when there's no natural code
+    (land_parcels' polygons are synthetic, id is all there is).
 
 generated_table-specific (backend/generate_data.py):
   rows, seed, geo
@@ -65,14 +57,11 @@ DATASETS = {
         ),
         "page_size": 25,
         "max_workers": 4,
-        # Full-BFE-resolution coastline geometry makes some pages far heavier
-        # than page_size alone suggests — a real 25-feature page at offset 300
-        # measured 75MB. sources/arcgis.py's MAX_PAGE_BYTES default (50MB,
-        # sized for postcodes' ~2.5MB pages) was rejecting these as if they
-        # were a runaway/hung response, failing every refresh at that offset.
-        # Override per-dataset here rather than raising the global default,
-        # which would blunt that cap's ability to catch an actual hang on
-        # lighter endpoints.
+        # Full-BFE coastline geometry makes some pages far heavier than
+        # page_size suggests — a real 25-feature page at offset 300 measured
+        # 75MB, well past MAX_PAGE_BYTES' 50MB default (sized for postcodes'
+        # ~2.5MB pages). Overridden per-dataset rather than raising the
+        # global default, which would blunt its hang-detection elsewhere.
         "max_page_bytes": 150 * 1024 * 1024,
         "field_mapping": {
             "lad_code": "LAD25CD",
@@ -111,30 +100,25 @@ DATASETS = {
         "kind": "arcgis",
         "polygon": True,
         # BGC ("Boundaries Generalised, Clipped") variant, not the full-
-        # resolution BFE used for uk_districts/msoa — deliberately: at
-        # 188,880 features (~26x msoa's count), full-resolution coastline
-        # detail per polygon would make both the fetch and the tippecanoe
-        # run impractically heavy for what's the UK census's smallest,
-        # unnamed geography (an Output Area has no place name, just a code
-        # — see field_mapping below, there's no "name" field to map).
+        # resolution BFE used for uk_districts/msoa — at 188,880 features
+        # (~26x msoa's count), full-resolution coastline detail would make
+        # both the fetch and the tippecanoe run too heavy. An Output Area is
+        # also the census's smallest geography with no place name, just a
+        # code (see field_mapping — there's no "name" field to map).
         "feature_server": (
             "https://services1.arcgis.com/ESMARspQHYMw9BZ9/arcgis/rest/services/"
             "OA_2021_EW_BGC_V2_RUC/FeatureServer/0/query"
         ),
-        # Benchmarked directly against this endpoint before picking these
-        # (see the "don't assume a page size transfers to a new endpoint"
-        # rule in sources/arcgis.py's docstring): maxRecordCount is 2000,
-        # and each 2000-feature page is only ~1KB/feature here (BGC is far
+        # Benchmarked directly against this endpoint: maxRecordCount is
+        # 2000, and each 2000-feature page is only ~1KB/feature (BGC is far
         # lighter than uk_districts/msoa's full-resolution boundaries), so
-        # unlike those two, the ceiling here is server-side pagination, not
-        # payload weight — page_size is set to the server's own max.
+        # the ceiling here is server pagination, not payload weight —
+        # page_size is set to the server's own max.
         "page_size": 2000,
         "max_workers": 4,
-        # See "max_zoom (optional)" above — `-zg` guessed 9 for this dataset
-        # (vs. 13 for uk_districts/msoa), far too coarse for ~770m-wide
-        # polygons: below zoom ~13 each OA is under a pixel, so tippecanoe
-        # substituted placeholder squares instead of real shape. 14 keeps an
-        # average OA comfortably multi-pixel-wide at full zoom.
+        # See "max_zoom" above — `-zg` guessed 9 here (vs. 13 for
+        # uk_districts/msoa), too coarse for ~770m-wide polygons. 14 keeps
+        # an average OA comfortably multi-pixel at full zoom.
         "max_zoom": 14,
         "field_mapping": {
             "oa_code": "OA21CD",
@@ -147,29 +131,25 @@ DATASETS = {
             "perimeter_m": "Shape__Length",
         },
         "float_fields": ["area_sqm", "perimeter_m"],
-        # No "name" field exists for an Output Area (see above) — lsoa_name
-        # (its parent geography, which *is* named) is the closest
-        # human-readable label available when identifying one on the map.
+        # No "name" field for an Output Area — lsoa_name (its parent
+        # geography) is the closest human-readable label available.
         "tile_fields": ["oa_code", "lsoa_name"],
         "code_column": "oa_code",
     },
     "postcodes": {
         "kind": "arcgis",
         "polygon": False,
-        # The "Live" table (current, non-terminated postcodes only —
-        # 1,810,364 of them, confirmed via returnCountOnly) rather than a
-        # dated quarterly snapshot (~2.7M, includes historical/terminated
-        # postcodes) — a current lookup table is what's actually useful
-        # here, not postcode history.
+        # The "Live" table (current, non-terminated postcodes only — 1.81M,
+        # confirmed via returnCountOnly) rather than a dated quarterly
+        # snapshot (~2.7M, includes historical ones) — a current lookup
+        # table is what's useful here, not postcode history.
         "feature_server": (
             "https://services1.arcgis.com/ESMARspQHYMw9BZ9/arcgis/rest/services/"
             "Online_ONS_Postcode_Directory_Live/FeatureServer/0/query"
         ),
-        # Benchmarked directly (same rule as oa/msoa): maxRecordCount is
-        # 2000 and each 2000-row page is a lean ~1.2KB/row despite 57
-        # available source fields (most are short fixed-width codes) — the
-        # server's own page-size ceiling is the limit here, not payload
-        # weight, same situation as oa.
+        # maxRecordCount is 2000 and each page is a lean ~1.2KB/row (most
+        # fields are short fixed-width codes) — server pagination is the
+        # limit here, not payload weight, same as oa.
         "page_size": 2000,
         "max_workers": 4,
         "field_mapping": {

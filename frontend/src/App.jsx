@@ -47,10 +47,9 @@ export default function App() {
   const [fullDatasetResult, setFullDatasetResult] = useState(null);
   const [fullDatasetLoading, setFullDatasetLoading] = useState(false);
 
-  // Refresh-job tracking lives here, not per-Sidebar-row, so a job's progress
-  // modal can be minimized/reopened independent of the row that started it,
-  // and survives a page reload (the job itself runs server-side — see
-  // getRefreshJobs() below, which rediscovers anything still in flight).
+  // Lives here, not per-Sidebar-row, so the progress modal can be
+  // minimized/reopened independent of the row that started it, and
+  // survives a page reload (getRefreshJobs() below rediscovers in-flight jobs).
   const [refreshJobs, setRefreshJobs] = useState({});
   const pollRefs = useRef({});
 
@@ -126,9 +125,8 @@ export default function App() {
     [stopPollingJob]
   );
 
-  // Discover jobs already running on the server (survives a page reload or
-  // the app having crashed mid-job) — start them minimized, since a job the
-  // user didn't just click shouldn't pop an intrusive modal on every load.
+  // Discover jobs already running server-side and start them minimized —
+  // a job the user didn't just click shouldn't pop a modal on every load.
   useEffect(() => {
     getRefreshJobs()
       .then((jobs) => {
@@ -246,12 +244,10 @@ export default function App() {
     }
   }, []);
 
-  // Discovery chat — one conversation shared by the landing screen and the
-  // persistent side panel (DiscoverChat.jsx is the same component rendered
-  // in both places, against this same state), so dismissing the landing
-  // screen doesn't lose or restart it. Stateless on the server (like the
-  // existing "Ask AI" tab) — this array *is* the history, resent in full
-  // on every turn.
+  // One conversation shared by the landing screen and the persistent side
+  // panel (same DiscoverChat component, same state), so dismissing the
+  // landing screen doesn't lose or restart it. Stateless server-side, like
+  // the "Ask AI" tab — this array is the history, resent in full each turn.
   const [chatMessages, setChatMessages] = useState([]);
   const [chatSending, setChatSending] = useState(false);
   const [chatError, setChatError] = useState(null);
@@ -284,10 +280,9 @@ export default function App() {
     [chatMessages]
   );
 
-  // A suggestion chip's dataset click reuses the exact same "open" path a
-  // sidebar row click does (openDataset) — the chat is a second entry point
-  // into that, not a parallel one — plus dismissing the landing screen and
-  // keeping that dataset highlighted so its row is easy to find afterward.
+  // Reuses the same openDataset path a sidebar click does — the chat is a
+  // second entry point into it, not a parallel one — plus dismisses the
+  // landing screen and keeps the dataset highlighted.
   const useSuggestedDataset = useCallback(
     (name) => {
       openDataset(name);
@@ -297,20 +292,16 @@ export default function App() {
     [openDataset]
   );
 
-  // A query suggestion lands in the editor for review, same as "Ask AI"
-  // generated SQL — never auto-run (see CLAUDE.md's natural-language SQL
-  // section for why: a second, silent execution path around the one Run
-  // button would undercut "generated SQL always lands in the tab for
-  // review").
+  // Lands in the editor for review, same as "Ask AI" generated SQL —
+  // never auto-run (see CLAUDE.md's natural-language SQL section).
   const useSuggestedQuery = useCallback((sql, datasets) => {
     setSql(sql);
     setHighlightedDatasets(datasets || []);
     setShowLanding(false);
   }, []);
 
-  // Turning AI guide mode off is one action regardless of which control
-  // triggered it (the toggle button, or the panel's own × ) — see the JSX
-  // below for why both need to behave identically.
+  // Shared by the toggle button and the panel's own × so both close the
+  // same way and clear the highlight.
   const closeChatPanel = useCallback(() => {
     setChatPanelOpen(false);
     setHighlightedDatasets([]);
@@ -413,14 +404,9 @@ export default function App() {
               )}
             </div>
 
-            {/* This whole trailing group (source-segment + row count) is one
-                right-anchored unit — margin-left:auto lives only on it, not
-                also on the caption, so the group's position doesn't shift
-                depending on whether the caption happens to be rendered
-                (previously: both had their own auto margin, splitting the
-                free space between them and making the segment drift toward
-                center on the table tab, flush-right only on the map tab
-                where the caption is absent). */}
+            {/* margin-left:auto lives only on this group, not also on the
+                caption, so its position doesn't shift depending on whether
+                the caption is rendered. */}
             <div className="res-tabbar-trailing">
               {activeQuery && status !== "error" && activeQuery.baseTable && (
                 <div className="seg" role="tablist" aria-label="Data source">
@@ -481,14 +467,8 @@ export default function App() {
             )}
             {elapsed != null && status !== "error" && <span className="sep">· {elapsed} ms</span>}
             {/* Lives in the statusbar rather than floating over the map —
-                a fixed-position button had to dodge MapLibre's own bottom-
-                right attribution control, which got fiddly and still risked
-                colliding with it. Anchored in the app's own chrome instead,
-                it's never in the map's way at all. Same toggle either way
-                in — clicking this or the panel's own × both count as
-                turning AI guide mode off, so it reliably means "off", not
-                two subtly different kinds of closed; turning off also
-                clears any sidebar highlight a suggestion left behind. */}
+                a fixed-position button kept colliding with MapLibre's own
+                bottom-right attribution control. */}
             <button
               className={`chat-toggle-btn ${chatPanelOpen ? "active" : ""}`}
               onClick={() => (chatPanelOpen ? closeChatPanel() : setChatPanelOpen(true))}

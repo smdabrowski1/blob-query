@@ -65,11 +65,9 @@ def main():
             print(f"[{name}] migrated to version {version} ({row_count:,} rows)"
                   + (f" + {new_mbtiles.name}" if new_mbtiles else ""))
 
-            # Flat .geojson build intermediates are consumed (already tiled
-            # into the .mbtiles just migrated) and not referenced by
-            # anything going forward — the new refresh flow writes and
-            # cleans up its own per-version .geojson. Nothing left to do
-            # with them but reclaim the space.
+            # Flat .geojson build intermediates are already tiled into the
+            # .mbtiles just migrated and aren't referenced going forward —
+            # just reclaim the space.
             flat_geojson = DATA_DIR / f"{name}.geojson"
             if flat_geojson.is_file():
                 size_mb = flat_geojson.stat().st_size / 1e6

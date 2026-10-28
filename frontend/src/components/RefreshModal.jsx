@@ -115,10 +115,9 @@ function JobModal({ name, job, onMinimize, onDismiss }) {
   );
 }
 
-// Minimized jobs render nothing here — the sidebar's own inline phase badge
-// (Sidebar.jsx's DatasetRefreshControl) already shows live status next to
-// the dataset and reopens this modal on click, so a second floating
-// indicator for the same state was redundant chrome, not extra information.
+// Minimized jobs render nothing here — Sidebar.jsx's DatasetRefreshControl
+// already shows live status next to the dataset and reopens this modal on
+// click.
 export default function RefreshModal({ jobs, onMinimize, onDismiss }) {
   const open = Object.entries(jobs).filter(([, job]) => !job.minimized);
   if (open.length === 0) return null;

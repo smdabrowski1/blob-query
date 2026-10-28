@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
-// Replaces the browser's native textarea resize grip (the small diagonal
-// lines in the bottom-right corner) with a full-width drag handle along the
-// bottom edge — the same interaction as the sidebar's own resize handle
-// (Sidebar.jsx), rather than each resizable text box in the app having its
-// own inconsistent, easy-to-miss native affordance.
+// Replaces the browser's native textarea resize grip with a full-width drag
+// handle along the bottom edge — same interaction as the sidebar's resize
+// handle (Sidebar.jsx).
 export default function ResizableTextarea({
   className,
   wrapClassName,

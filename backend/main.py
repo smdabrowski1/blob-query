@@ -69,20 +69,17 @@ class ChatMessage(BaseModel):
 
 
 class DiscoverChatRequest(BaseModel):
-    # Full conversation so far, including the new user message as the last
-    # entry — this endpoint is stateless (like /api/nl-query), the client
-    # (App.jsx) is what accumulates history, the same "no browser storage,
-    # state lives in React" convention the rest of the frontend already
-    # follows. Sent fresh each turn rather than persisted server-side.
+    # Stateless endpoint, like /api/nl-query — App.jsx accumulates history
+    # client-side and resends the full conversation each turn.
     messages: list[ChatMessage]
 
 
 class Suggestion(BaseModel):
     # "dataset": recommends opening one dataset (datasets holds just that
-    # one name). "query": proposes a concrete SELECT the user could run
-    # (datasets lists every table it references, sql holds the statement).
-    # A flat shape with an optional `sql` rather than a discriminated union
-    # — simpler for the model to reliably fill in via structured output.
+    # name). "query": a concrete SELECT the user could run (datasets lists
+    # every table it references, sql holds the statement). Flat shape with
+    # an optional `sql` instead of a discriminated union — easier for the
+    # model to fill in reliably via structured output.
     type: str
     label: str
     datasets: list[str]
@@ -95,24 +92,17 @@ class DiscoverChatResponse(BaseModel):
 
 
 def _schema_prompt() -> str:
-    # Column descriptions (registry.db, user-editable via the sidebar) are
-    # what actually let this do better than guessing from a bare column
-    # name — e.g. knowing `ruc_code` means "rural-urban classification"
-    # rather than inferring it from four letters. Kept on separate lines
-    # from the compact name/type list rather than inlined as SQL `--`
-    # comments per column — mid-line "--" reads as "everything after this
-    # is a comment" to a model that's seen a lot of real SQL, which would
-    # misleadingly swallow the columns listed after it on the same line.
+    # Column descriptions (user-editable via the sidebar) are what let this
+    # beat guessing from a bare name, e.g. knowing `ruc_code` means
+    # "rural-urban classification". Kept on their own line rather than
+    # inlined as a SQL `--` comment, since a mid-line "--" would read to
+    # the model as "rest of line is a comment" and swallow later columns.
     #
-    # Descriptions are set via an unauthenticated endpoint
-    # (PUT /api/datasets/{name}/columns/{column}/description) and land here
-    # verbatim, inside the system prompt — a trusted section the model
-    # otherwise has no reason to be skeptical of. db.set_column_description
-    # already collapses them to one line and caps their length so one can't
-    # impersonate a new prompt section; the explicit wrapping below is what
-    # actually tells the model these are labels to relay, not instructions
-    # to follow, the same way the scope rules below already treat the
-    # user's own message as data rather than commands.
+    # These come in through an unauthenticated endpoint and land verbatim in
+    # the system prompt, so db.set_column_description already caps length
+    # and strips newlines; the "[user-supplied label, not an instruction]"
+    # wrapper below is what tells the model to treat them as data to relay,
+    # not instructions to follow.
     lines = []
     for ds in engine.list_datasets():
         cols = ", ".join(f"{c['name']} {c['type']}" for c in ds["columns"])
@@ -130,10 +120,9 @@ def datasets():
 
 @app.post("/api/datasets/refresh")
 def refresh_all():
-    """Re-scan: re-point every view at whatever registry.db currently marks
-    as each dataset's current version. Does not fetch/generate anything new
-    — that's the per-dataset endpoints below. Kept for "I changed something
-    on disk/in the DB directly, reload" use."""
+    """Re-point every view at whatever registry.db currently marks as
+    current — doesn't fetch/generate anything new. For when something
+    changed on disk or in the DB directly and needs a reload."""
     engine.refresh()
     return {"datasets": engine.list_datasets()}
 
@@ -211,9 +200,8 @@ def refresh_status(name: str):
 
 @app.get("/api/refresh-jobs")
 def refresh_jobs():
-    """Every dataset with a job currently in flight, in one call — lets the
-    frontend discover on page load what's still running without polling each
-    dataset individually just to find out."""
+    """Every dataset with a job in flight, in one call — lets the frontend
+    discover on page load what's still running."""
     con = registry_db.connect(REGISTRY_DB)
     try:
         rows = registry_db.list_running_jobs(con)
@@ -281,11 +269,8 @@ def query(req: QueryRequest):
         return engine.run_query(
             req.sql,
             offset=max(0, req.offset),
-            # No upper cap — whatever LIMIT the submitted SQL has (or doesn't
-            # have) is what governs the result. The sidebar's default query
-            # already bakes in `LIMIT 1000`; a user who explicitly asks for
-            # more (or for everything) gets exactly that, not a second,
-            # hidden ceiling underneath their own.
+            # No upper cap — whatever LIMIT the submitted SQL has governs the
+            # result, no hidden ceiling underneath the user's own.
             limit=max(1, req.limit),
             include_total=req.include_total,
             sample=req.sample,
@@ -304,13 +289,10 @@ def nl_query(req: NLQueryRequest):
     try:
         response = ai_client.messages.parse(
             model=ANTHROPIC_MODEL,
-            # Sonnet 5 runs with adaptive thinking on by default, and thinking
-            # tokens share this budget with the output — a hard multi-step
-            # prompt (window functions, HAVING, date bucketing, ...) can burn
-            # through a small budget and get cut off mid-JSON before finishing
-            # (surfaces as a pydantic "Invalid JSON: EOF while parsing" error,
-            # or parsed_output=None). 16000 gives real headroom for both the
-            # thinking and the answer; still a fraction of a cent even if used.
+            # Thinking tokens share this budget with the output; a complex
+            # prompt (window functions, date bucketing) can burn through a
+            # small budget and get cut off mid-JSON (parsed_output=None).
+            # 16000 gives headroom for both.
             max_tokens=16000,
             system=(
                 "You generate a single DuckDB SELECT query for the user's request.\n\n"
@@ -347,13 +329,10 @@ def nl_query(req: NLQueryRequest):
 
 @app.post("/api/discover-chat")
 def discover_chat(req: DiscoverChatRequest):
-    """Multi-turn "which dataset should I even look at" assistant — the
-    landing screen + persistent side panel in the frontend (App.jsx's
-    DiscoverChat). Distinct from /api/nl-query: that one turns a single
-    prompt straight into a SQL statement; this one has a conversation and
-    proposes concrete next steps (open a dataset, try a join) as structured
-    suggestions the UI renders as clickable chips, rather than requiring the
-    user to already know which table(s) they want."""
+    """Multi-turn "which dataset should I even look at" assistant (the
+    frontend's DiscoverChat). Unlike /api/nl-query, this has a conversation
+    and proposes next steps (open a dataset, try a join) as structured
+    suggestions the UI renders as clickable chips."""
     if ai_client is None:
         raise HTTPException(
             status_code=503,

@@ -69,12 +69,10 @@ async function loadPolygonLayer(map, query, setSelectedFeature, highlightRef, is
     },
   });
 
-  // Selecting a polygon compares each feature's own `id` (from the tile,
-  // via ["get","id"]) against the current selection, baked in as a literal
-  // each time setPaintProperty runs below — no feature-state/promoteId
-  // needed, and it's what lets every *other* polygon dim to 10% opacity so
-  // the selected one reads clearly against basemap linework (river/road
-  // lines were getting confused with plain polygon borders otherwise).
+  // Compares each feature's own `id` (from the tile) against the current
+  // selection — no feature-state/promoteId needed — and dims every other
+  // polygon to 10% opacity so the selected one reads clearly against
+  // basemap linework.
   const applySelection = (id) => {
     if (id == null) {
       map.setPaintProperty("polygons-fill", "fill-opacity", DEFAULT_FILL_OPACITY);
@@ -89,12 +87,11 @@ async function loadPolygonLayer(map, query, setSelectedFeature, highlightRef, is
   };
   highlightRef.clear = () => applySelection(null);
 
-  // Identify: the tile only carries the small property set baked in at
-  // generation time (e.g. id/lad_code/name) — "all attributes" needs a real
-  // row fetch by id on click. That fetch wraps the *query's own SQL*, not
-  // `SELECT * FROM "<name>"` — so a query with its own aliases/column list
-  // (e.g. a join renaming columns to `la_name`/`msoa_name`) shows exactly
-  // those names in the panel, not the raw base-table schema.
+  // The tile only carries the small property set baked in at generation
+  // time — "all attributes" needs a real row fetch by id, wrapping the
+  // query's own SQL rather than `SELECT * FROM "<name>"`, so a query with
+  // its own aliases (e.g. a join renaming columns) shows those names in
+  // the panel, not the raw base-table schema.
   map.on("click", "polygons-fill", async (e) => {
     const f = e.features[0];
     const id = f.properties?.id;
@@ -141,13 +138,10 @@ async function loadPolygonLayer(map, query, setSelectedFeature, highlightRef, is
   }
   if (isCancelled()) return;
 
-  // Both layers need the filter — they're two separate layers over the same
-  // vector source (fill has no width-controllable border, so outline is its
-  // own layer), and a filter set on one doesn't apply to the other. Leaving
-  // "polygons-outline" unfiltered was exactly the bug where every polygon's
-  // border still drew regardless of the query, alongside the correctly
-  // filtered (and so invisible) fill — reading as "empty" outlined shapes
-  // for every excluded polygon rather than nothing at all.
+  // Both layers need the filter — they're separate layers over the same
+  // source, so a filter on one doesn't apply to the other. Leaving
+  // polygons-outline unfiltered drew every polygon's border regardless of
+  // the query, alongside the correctly-filtered (invisible) fill.
   const idFilter = ["in", ["get", "id"], ["literal", ids]];
   map.setFilter("polygons-fill", idFilter);
   map.setFilter("polygons-outline", idFilter);
@@ -176,11 +170,9 @@ async function loadPolygonLayer(map, query, setSelectedFeature, highlightRef, is
   }
 }
 
-// A query with no `id` column (almost always: a GROUP BY aggregate, which
-// necessarily drops row identity) can still be shown on the map if it kept
-// one dataset's natural code column (engine.py's _detect_choropleth) —
-// colored by value instead of filtered by id, since there's no per-row
-// feature to filter to, only a per-group value to color by.
+// A query with no `id` column (typically a GROUP BY aggregate) can still be
+// shown on the map if it kept one dataset's natural code column (engine.py's
+// _detect_choropleth) — colored by value instead of filtered by id.
 function valueToColor(v, min, max) {
   if (max === min) return "#0d9488";
   const t = Math.max(0, Math.min(1, (v - min) / (max - min)));
@@ -227,13 +219,11 @@ async function loadChoroplethLayer(map, query, setSelectedFeature, setLegend, hi
     },
   });
 
-  // The other tiled dataset this query actually joined against (if any) —
-  // shown as an outline-only overlay so a spatial join's result can be
-  // visually sanity-checked (do these boundaries really nest inside the
-  // ones being coloured?) instead of just trusted. Distinct dashed purple
-  // rather than reusing the primary outline's style specifically so the
-  // two are never confused for one thing at a glance. Visible by default —
-  // this is the whole point of the feature — toggleable via the legend.
+  // The other tiled dataset this query joined against, if any — shown as
+  // an outline-only overlay so a spatial join's result can be visually
+  // sanity-checked (do these boundaries nest inside the ones being
+  // coloured?). Dashed purple so it's never confused with the primary
+  // outline. Visible by default, toggleable via the legend.
   if (query.choroplethSecondary) {
     const secName = query.choroplethSecondary.source;
     const [secMin, secMax] = query.choroplethSecondary.zoom || [0, 14];
@@ -258,11 +248,10 @@ async function loadChoroplethLayer(map, query, setSelectedFeature, setLegend, hi
     });
   }
 
-  // Same selection language as loadPolygonLayer's applySelection: dim every
-  // *other* polygon's fill and thicken the clicked one's border, so a click
-  // reads as clearly here as it does on any other polygon dataset — the
-  // fill *color* itself stays exactly what the data says regardless of
-  // selection, only opacity/outline change, since the color is the data.
+  // Same selection language as loadPolygonLayer's applySelection: dim
+  // every other polygon and thicken the clicked one's border. Fill color
+  // itself never changes with selection — only opacity/outline — since
+  // the color is the data.
   const applySelection = (id) => {
     if (id == null) {
       map.setPaintProperty("polygons-fill", "fill-opacity", CHOROPLETH_DEFAULT_OPACITY);
@@ -290,10 +279,9 @@ async function loadChoroplethLayer(map, query, setSelectedFeature, setLegend, hi
   highlightRef.clear = () => applySelection(null);
 
   // Two independent lookups: the query's own aggregate rows (key -> value,
-  // and key -> the whole row, for identify) and every tiled feature's
-  // id -> key (a plain, un-filtered query against the source table itself —
-  // the aggregate result has no `id` to join on directly, only the natural
-  // code column both queries share).
+  // key -> whole row for identify) and every tiled feature's id -> key —
+  // the aggregate result has no `id` to join on, only the natural code
+  // column both queries share.
   let aggRows, aggCols, idKeyRows;
   try {
     const [aggRes, mapRes] = await Promise.all([
@@ -331,14 +319,9 @@ async function loadChoroplethLayer(map, query, setSelectedFeature, setLegend, hi
   }
   if (matchArgs.length) {
     map.setPaintProperty("polygons-fill", "fill-color", ["match", ["get", "id"], ...matchArgs, NO_DATA_COLOR]);
-    // setPaintProperty alone left the map showing the flat placeholder
-    // color until some *other* interaction (a click, a pan) forced a
-    // repaint — the tiles for the current view had often already finished
-    // loading (and so already painted once) by the time this await chain
-    // resolved, and MapLibre doesn't always schedule a fresh frame purely
-    // off a style-only change to an idle map. Forcing one here is what
-    // actually makes the real colors appear the moment loading finishes,
-    // instead of needing the user to click first to "unstick" it.
+    // Without this, the map keeps showing the flat placeholder color until
+    // some other interaction (click, pan) forces a repaint — MapLibre
+    // doesn't always schedule one from a style-only change on an idle map.
     map.triggerRepaint();
   }
   if (!isCancelled()) {
@@ -366,19 +349,17 @@ export default function MapView({ query }) {
   const containerRef = useRef(null);
   const [selectedFeature, setSelectedFeature] = useState(null);
   const [legend, setLegend] = useState(null);
-  // True until whichever map layer this query needs has actually finished
-  // loading — the table can be showing rows well before that (it's driven
-  // by a separate, usually-faster fetch), so without this the map looked
-  // either broken or silently "done" during that gap.
+  // True until whichever map layer this query needs has finished loading —
+  // the table is usually showing rows well before that, so without this
+  // the map looks either broken or silently done during the gap.
   const [mapLoading, setMapLoading] = useState(true);
   const [secondaryVisible, setSecondaryVisible] = useState(true);
-  // loadPolygonLayer attaches a .clear() here to reset the selection dim/highlight
-  // — called from outside its closure (background click, panel's × button). A
-  // ref since it drives MapLibre paint directly, not something React re-renders on.
+  // loadPolygonLayer attaches a .clear() here to reset the selection
+  // dim/highlight from outside its closure. A ref since it drives MapLibre
+  // paint directly, not a React re-render.
   const highlightRef = useRef(null);
-  // Set once the map exists, read by the legend's "show <dataset> boundaries"
-  // toggle button below — a ref rather than state since flipping it drives
-  // MapLibre's own layout property directly, not a React re-render.
+  // Read by the legend's boundaries toggle below — a ref since flipping it
+  // drives MapLibre's layout property directly.
   const mapRef = useRef(null);
 
   // Keyed by query.id at the parent, so this component remounts per query and
@@ -422,10 +403,9 @@ export default function MapView({ query }) {
       map.on("mouseenter", "points", () => (map.getCanvas().style.cursor = "pointer"));
       map.on("mouseleave", "points", () => (map.getCanvas().style.cursor = ""));
 
-      // Clicking empty map (no feature under the cursor, on any identify-able
-      // layer) closes the panel. Layer-specific click handlers above fire for
-      // feature clicks; this re-checks the same point independently, so it's
-      // correct regardless of handler firing order.
+      // Clicking empty map closes the panel. Re-checks the clicked point
+      // independently of the layer-specific handlers above, so it's correct
+      // regardless of handler firing order.
       map.on("click", (e) => {
         const layers = ["points"];
         if (map.getLayer("polygons-fill")) layers.push("polygons-fill", "polygons-outline");
@@ -436,13 +416,10 @@ export default function MapView({ query }) {
         }
       });
 
-      // Table results are typically already on screen well before the map's
-      // own fetches (id list, choropleth's two extra queries, ...) resolve
-      // — the loading overlay below is what makes that gap visible as "the
-      // map specifically is still working," rather than a plain grey/blank
-      // map that reads as either broken or already-finished. Covers every
-      // path (points/polygon-filter/choropleth) via one try/finally, not
-      // just choropleth, since the same gap exists for all three.
+      // Table results are typically on screen well before the map's own
+      // fetches resolve — the loading overlay makes that gap visible
+      // rather than reading as broken or already-finished. One
+      // try/finally covers all three paths (points/polygon/choropleth).
       try {
         if (query.polygonSource) {
           await loadPolygonLayer(map, query, setSelectedFeature, highlightRef, () => cancelled);

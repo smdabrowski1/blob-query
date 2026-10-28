@@ -40,9 +40,8 @@ function computeColumnCharCaps(columns, sampleRows) {
 }
 
 // Light theme tuned to match the app shell. Selection/link accents use the
-// status teal rather than the brand coral (styles.css's --accent) — a data
-// grid's own selection outline is a different kind of "accent" than a CTA
-// button, and every selected cell edge being hot pink would be a lot.
+// status teal, not the brand coral (styles.css's --accent) — every selected
+// cell edge in hot pink would be a lot.
 const gridTheme = {
   accentColor: "#0d9488",
   accentLight: "rgba(13,148,136,0.12)",
@@ -160,12 +159,10 @@ export default function ResultsGrid({ query }) {
       const raw = chunk[row % CHUNK]?.[col];
       const isNull = raw === null || raw === undefined;
       const display = isNull ? "NULL" : String(raw);
-      // `data` always carries the full value (so clicking a cell's overlay
-      // still shows/copies the complete geometry WKT, not the shortened
-      // preview) — only `displayData`, what's actually painted in the cell,
-      // gets cut down to the column's char cap. An explicit "…" beats
-      // letting the canvas silently clip the string mid-character at
-      // whatever pixel the column happens to end at.
+      // `data` always carries the full value (so a cell's overlay still
+      // shows/copies the complete geometry WKT) — only `displayData` gets
+      // truncated to the column's char cap, with an explicit "…" instead
+      // of letting the canvas clip it mid-character.
       const cap = charCapsRef.current[col] ?? MAX_COL_CHARS;
       const displayData = display.length > cap ? `${display.slice(0, cap)}…` : display;
       return {

@@ -86,17 +86,16 @@ cp .env.example .env   # or just edit the .env already there
 
 `main.py` loads `backend/.env` via `python-dotenv` at startup. Without a key set,
 `ai_client` stays `None`, `/api/health` reports `aiEnabled: false`, and the tab
-shows a "not configured" message instead of failing on click — this is a fully
-optional feature, not a hard dependency. Model is `ANTHROPIC_MODEL` (default
-`claude-sonnet-5`), also read from `.env`.
+shows a "not configured" message instead of failing on click. Model is
+`ANTHROPIC_MODEL` (default `claude-sonnet-5`), also read from `.env`.
 
 **Generated SQL always lands in the SQL tab for review — it never auto-runs.**
-There's also no extra validation/sandboxing on AI-generated SQL: `run_query`
-already wraps *any* submitted SQL (human- or AI-written) as `SELECT * FROM
-(<sql>) AS _sub LIMIT ? OFFSET ?`, which structurally rejects anything that
-isn't a single SELECT-shaped expression, plus `_reject_filesystem_access`
-(see "How querying works"). Don't add a second safety layer here — it'd be
-redundant with a gate that already exists for every query path.
+There's no extra validation/sandboxing on AI-generated SQL beyond what every
+query already goes through: `run_query` wraps any submitted SQL as `SELECT *
+FROM (<sql>) AS _sub LIMIT ? OFFSET ?` (rejects anything that isn't a single
+SELECT) plus `_reject_filesystem_access` (see "How querying works"). Don't
+add a second layer here — it'd duplicate a gate that already exists for
+every query path.
 
 **Prompt injection:** both `/api/nl-query`'s and `/api/discover-chat`'s
 system prompts have an explicit scope section telling the model to treat
@@ -141,70 +140,57 @@ is newest.
 
 **Storage: files on disk, a small SQLite registry for metadata.**
 `backend/data/<name>/<version>.parquet` (+ `backend/tiles/<name>/<version>.mbtiles`
-for polygon datasets) — big blobs stay files, a database is the wrong place
-for those. `backend/registry.db` (via `backend/db.py`, stdlib `sqlite3` —
-already a dependency here, same as reading `.mbtiles`) tracks which version
-is current, status, row count, and file paths in one `dataset_versions`
-table. Flipping "current" is a single SQL transaction (old version →
-`superseded`, new version → `is_current=1, status='active'`), not a
-hand-rolled file-pointer dance — a bare "current version" text file edited
-in place isn't crash-safe (a power cut mid-write leaves it truncated); a
-transaction's rollback-on-failure guarantee is.
+for polygon datasets) — big blobs stay files. `backend/registry.db` (via
+`backend/db.py`, stdlib `sqlite3`) tracks which version is current, status,
+row count, and file paths in one `dataset_versions` table. Flipping "current"
+is a single SQL transaction (old version → `superseded`, new version →
+`is_current=1, status='active'`) instead of a hand-edited pointer file,
+which a crash mid-write would leave truncated.
 
-**The actual data files still need write-to-temp-then-validate-then-rename**
-(`backend/refresh.py`) — a database transaction can't retroactively make a
-half-downloaded 90MB parquet file valid, that's a separate, file-level
-concern. `run_refresh()`: writes to `.tmp-<version>.parquet`/`.mbtiles`,
-validates (parquet opens and has rows; for polygon kinds, the ArcGIS fetch's
-total count matches what `returnCountOnly` reported, and the `.mbtiles` has
-a non-empty `tiles` table), *then* `os.replace()`s into the final `<version>.*`
-name, *then* runs the registry transaction. A refresh that fails or is
-interrupted at any point before that last step never touches what's
-currently being served — the previous version's row stays `is_current=1`
-throughout. A job's row starts in `status='fetching'` before any file I/O,
-so "is a refresh already running" is a DB query
-(`reap_stale_jobs`/`has_running_job` in `db.py`), not a separate in-memory
-structure that forgets everything on restart — though this means a
-container crash mid-job leaves that dataset's refresh **locked out for up to
-`STALE_AFTER_MINUTES` (60)** before a retry is allowed, since a young
-non-terminal row can't be distinguished from a genuinely-still-running job
-without a time threshold. A known, accepted tradeoff, not a bug — lower it
-if 60 minutes turns out to be impractical in practice.
+**The data files themselves still need write-to-temp-then-validate-then-rename**
+(`backend/refresh.py`) — a transaction can't retroactively make a
+half-downloaded 90MB parquet file valid. `run_refresh()`: writes to
+`.tmp-<version>.parquet`/`.mbtiles`, validates (parquet opens and has rows;
+for polygon kinds, the ArcGIS fetch's total count matches what
+`returnCountOnly` reported, and the `.mbtiles` has a non-empty `tiles`
+table), *then* `os.replace()`s into the final `<version>.*` name, *then*
+runs the registry transaction. A refresh that fails or is interrupted before
+that last step never touches what's currently served. A job's row starts in
+`status='fetching'` before any file I/O, so "is a refresh already running"
+is a DB query (`reap_stale_jobs`/`has_running_job` in `db.py`), not an
+in-memory structure that forgets everything on restart — though a container
+crash mid-job leaves that dataset's refresh locked out for up to
+`STALE_AFTER_MINUTES` (60) before a retry is allowed, since a young
+non-terminal row can't be told apart from a genuinely-running job without a
+time threshold. A known tradeoff — lower it if 60 minutes proves impractical.
 
 **One generic fetcher per *kind* of source, not one script per dataset.**
 `backend/sources/arcgis.py` is the ArcGIS FeatureServer fetcher (paginate,
 retry with backoff, optionally concurrent, WKT-encode Polygon/MultiPolygon) —
-both `uk_districts` and `msoa` are just `backend/registry.py` config against
-this one module (URL, page size, concurrency, field mapping — see that
-file's entries), not separate near-duplicate scripts the way
-`fetch_uk_districts.py`/`fetch_msoa.py` used to be (deleted). `id` is always
-a synthetic sequential integer, never the real source code (`lad_code`/
+`uk_districts` and `msoa` are just `backend/registry.py` config against this
+one module (URL, page size, concurrency, field mapping). `id` is always a
+synthetic sequential integer, never the real source code (`lad_code`/
 `msoa_code` are separate columns) — `MapView.jsx`'s bounds query builds a
 bare `IN (${ids.join(",")})` SQL list, which only works unquoted for numeric
-ids. Page size/concurrency are tuned **per ArcGIS endpoint, empirically** —
+ids. Page size/concurrency are tuned per ArcGIS endpoint, empirically —
 uk_districts needed 25/page sequential, msoa tolerated 150/page with 5
-concurrent workers (I/O-bound waiting on the server, not CPU-bound — threads,
-not multiprocessing). A FeatureServer's `maxRecordCount` is a record-count
-cap, not a payload-size one; full-BFE-resolution geometry can hit the
-server's own request timeout well under that cap. Don't assume a page size
-transfers to a new endpoint without testing it first.
-`generate_data.py`/`generate_polygons.py` (the two `generated_*` kinds) stay
-as their own functions — genuinely different algorithms, not the same logic
-with different parameters, so there's nothing to de-duplicate there.
+concurrent workers (I/O-bound, so threads, not multiprocessing). A
+FeatureServer's `maxRecordCount` is a record-count cap, not a payload-size
+one; full-resolution geometry can hit the server's own request timeout well
+under that cap. Don't assume a page size transfers to a new endpoint without
+testing it. `generate_data.py`/`generate_polygons.py` (the two `generated_*`
+kinds) stay as their own functions — genuinely different algorithms.
 
 **tippecanoe moved from dev-only to a runtime dependency.** The refresh API
 tiles polygon datasets itself now, so the Dockerfile builds tippecanoe from
-source (`felt/tippecanoe` on GitHub) in its own stage rather than the old
+source (`felt/tippecanoe` on GitHub) in its own stage instead of the old
 "install locally, tile by hand" flow. Built from source rather than copying
-a prebuilt binary (e.g. from `klokantech/tippecanoe`, what manual tiling used
-before this) because that image is amd64-only — a straight binary copy into
-an arm64 runtime (this project builds arm64-native on Apple Silicon) would
-be a non-executable binary, not just a library mismatch. Building from
-source compiles natively for whatever architecture is actually running the
-build. `numpy`/`pyarrow`/`requests` moved from `requirements-dev.txt` to
-`requirements.txt` for the same reason — `backend/refresh.py` runs the same
-fetch/generate code from inside the deployed app now, not just from a
-developer's machine.
+a prebuilt binary (e.g. `klokantech/tippecanoe`) because that image is
+amd64-only — a binary copy into this project's arm64 runtime would be
+non-executable, not just a library mismatch. `numpy`/`pyarrow`/`requests`
+moved from `requirements-dev.txt` to `requirements.txt` for the same reason:
+`backend/refresh.py` now runs this code from inside the deployed app, not
+just from a developer's machine.
 
 `docker-compose.yml` bind-mounts `backend/tiles` and `backend/registry.db`
 alongside the existing `backend/data` mount — without those, a refresh
@@ -226,37 +212,30 @@ them; the map stays at whatever view it had. Not yet fixed.
 ### Map identify
 
 Clicking a point or polygon on the map opens a slide-in panel
-(`.feature-panel` in `MapView.jsx`) listing every attribute — not just a
-truncated popup. Points already carry their full row as GeoJSON properties
-(built client-side from the query result), so identify is free. Polygons only
-carry the handful of properties baked into the tile at generation time (e.g.
-`id`/`lad_code`/`name`), so a click fetches the rest — but by re-running
-**the query's own SQL**, wrapped and filtered to the clicked id
-(`SELECT * FROM (${innerSql}) AS _sub WHERE id = <id>`), not `SELECT * FROM
-"<name>" WHERE id = <id>` against the raw table. That distinction matters as
-soon as the query aliases/renames columns (e.g. a join like `SELECT d.name AS
+(`.feature-panel` in `MapView.jsx`) listing every attribute, not just a
+truncated popup. Points already carry their full row as GeoJSON properties,
+so identify is free. Polygons only carry the handful of properties baked
+into the tile at generation time (e.g. `id`/`lad_code`/`name`), so a click
+fetches the rest by re-running **the query's own SQL**, wrapped and filtered
+to the clicked id (`SELECT * FROM (${innerSql}) AS _sub WHERE id = <id>`),
+not `SELECT * FROM "<name>" WHERE id = <id>` against the raw table. That
+matters once the query aliases columns (e.g. a join like `SELECT d.name AS
 la_name, m.name AS msoa_name FROM msoa m JOIN uk_districts d ON
 ST_Intersects(...)`) — the panel shows `la_name`/`msoa_name`, matching what
-you actually selected, not `msoa`'s base schema. The raw `geometry` WKT column
-is still filtered out of the display (generation-time convention, not schema
-introspection). One identify mechanism for both geometry types — no separate
-`maplibregl.Popup` code path anymore.
+was actually selected. The raw `geometry` WKT column is filtered out of the
+display. One identify mechanism for both geometry types.
 
 Polygon borders are a separate `line` layer (`polygons-outline`), not
-`fill-outline-color` — that paint property has no width control, so a visible
-border needs its own layer. Selecting a polygon calls `map.setPaintProperty`
-on both `polygons-fill` and `polygons-outline` with a fresh `["case", ["==",
-["get","id"], selectedId], ...]` expression — comparing each feature's own
-`id` (straight from the tile) against the clicked id, no `feature-state`/
-`promoteId` needed. This drives two things at once: the selected polygon gets
-a thicker amber border, and — since a plain thicker border alone was getting
-visually confused with basemap linework like rivers — every *other* polygon's
-fill drops to 10% opacity, so the selection reads clearly regardless of border
-styling. `MapView.jsx` exposes this as a `.clear()` on a ref (`highlightRef`,
-not React state — it drives MapLibre paint directly) attached once the
-polygon layer loads; the background-click-to-close handler and the panel's ×
-button both call it, so the dim/highlight and the identify panel always
-open/close in lockstep.
+`fill-outline-color` — that paint property has no width control. Selecting a
+polygon calls `map.setPaintProperty` on both layers with a fresh `["case",
+["==", ["get","id"], selectedId], ...]` expression, comparing each
+feature's own `id` against the clicked id — no `feature-state`/`promoteId`
+needed. This gives the selected polygon a thicker amber border and drops
+every other polygon's fill to 10% opacity, so the selection reads clearly
+against basemap linework like rivers. `MapView.jsx` exposes this as a
+`.clear()` on a ref (`highlightRef`, not React state — it drives MapLibre
+paint directly); the background-click-to-close handler and the panel's ×
+button both call it, so dim/highlight and the panel stay in lockstep.
 
 ### Query / Full Dataset toggle
 
@@ -342,14 +321,12 @@ over dataset name, which was the point of not hardcoding `land_parcels`.
   best-effort (wrapped in try/except; an offline first boot just runs without
   spatial functions rather than crashing the whole app).
 - **Concurrency:** `main.py`'s routes are sync functions, which FastAPI runs
-  on a thread pool — but a single shared `duckdb.Connection` isn't safe for
+  on a thread pool — but a shared `duckdb.Connection` isn't safe for
   concurrent `execute()` calls from multiple threads (two requests racing on
-  it corrupted cursor state, surfacing as `fetchone()` returning `None` and
-  the frontend misreporting "can't reach the backend" for what was actually a
-  crashed request, not a dead server). `list_datasets()`, `run_query()`, and
-  `refresh()` each grab `self.con.cursor()` at the top rather than using
-  `self.con` directly — cheap, and the fix DuckDB's own docs recommend for
-  this exact multi-threaded-single-connection pattern.
+  it corrupted cursor state, surfacing as `fetchone()` returning `None`).
+  `list_datasets()`, `run_query()`, and `refresh()` each grab
+  `self.con.cursor()` at the top instead of using `self.con` directly — the
+  fix DuckDB's own docs recommend for this pattern.
 - Frontend uses **no browser storage** and plain fetch; keep it dependency-light.
   The editor is a `<textarea>` by design (CodeMirror is a deliberate future step).
 - Backend is storage-agnostic. To go remote, only view registration in

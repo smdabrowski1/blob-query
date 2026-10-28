@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 // Quick-start prompts shown before the first real message — one click sends
-// them exactly like typing and hitting Send (onSend), not a canned reply;
-// they're a demo of what to ask, not a static list of capabilities.
+// them exactly like typing and hitting Send, not a canned reply.
 const QUICK_START_PROMPTS = [
   "What's in the UK geography data?",
   "Which local authorities have the most MSOAs?",
@@ -11,9 +10,8 @@ const QUICK_START_PROMPTS = [
 
 // One conversation, two homes: the landing screen (variant="landing") and
 // the persistent side panel (variant="panel") both render this against the
-// same lifted state (App.jsx) — same messages array, same in-flight
-// request — so picking up the chat in the panel after dismissing the
-// landing screen continues the exact conversation, not a fresh one.
+// same lifted state (App.jsx), so dismissing the landing screen doesn't
+// restart the conversation.
 export default function DiscoverChat({
   variant,
   messages,
