@@ -1,5 +1,7 @@
 # Parquet Query Engine
 
+**[Live demo](https://blobquery.sebdabrowski.com)** · **[Walkthrough](https://sebdabrowski.com/blobquery)**
+
 A minimal SQL query workbench over parquet files. **DuckDB** does the querying,
 **FastAPI** serves it, and a **React + Glide Data Grid** frontend renders results
 with a windowed grid that scrolls millions of rows without loading them all.
