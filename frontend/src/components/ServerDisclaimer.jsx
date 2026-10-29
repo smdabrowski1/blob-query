@@ -2,8 +2,9 @@ export default function ServerDisclaimer({ onDismiss }) {
   return (
     <div className="server-disclaimer" role="note">
       <span className="server-disclaimer-text">
-        This is a demo running on a small server (&lt;4GB RAM); a heavy query
-        or a large AI-generated join can crash it. Please keep queries reasonable.
+        Please note that this is a demonstration running on a small server
+        (&lt;4GB RAM); as a result, a heavy query or a large AI-generated join
+        may cause it to crash.
       </span>
       <button
         type="button"
