@@ -5,6 +5,8 @@ import ResultsGrid from "./components/ResultsGrid.jsx";
 import MapView from "./components/MapView.jsx";
 import RefreshModal from "./components/RefreshModal.jsx";
 import DiscoverChat from "./components/DiscoverChat.jsx";
+import ServerDisclaimer from "./components/ServerDisclaimer.jsx";
+import { isServerDisclaimerDismissed, dismissServerDisclaimer } from "./serverDisclaimer.js";
 import {
   getDatasets,
   getHealth,
@@ -35,6 +37,14 @@ function ChatIcon() {
 }
 
 export default function App() {
+  // Shared with QueryEditor.jsx's copy of this same banner — dismissing
+  // either one dismisses both, for the current browser tab session.
+  const [disclaimerDismissed, setDisclaimerDismissed] = useState(isServerDisclaimerDismissed);
+  const dismissDisclaimer = () => {
+    dismissServerDisclaimer();
+    setDisclaimerDismissed(true);
+  };
+
   const [datasets, setDatasets] = useState([]);
   const [sql, setSql] = useState(DEFAULT_SQL);
   const [activeQuery, setActiveQuery] = useState(null);
@@ -336,6 +346,7 @@ export default function App() {
               <span className="landing-badge">AI Assistant</span>
               <h1>Meet your data assistant</h1>
             </div>
+            {!disclaimerDismissed && <ServerDisclaimer onDismiss={dismissDisclaimer} />}
             <DiscoverChat
               variant="landing"
               messages={chatMessages}
