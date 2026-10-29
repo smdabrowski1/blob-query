@@ -329,6 +329,11 @@ over dataset name, which was the point of not hardcoding `land_parcels`.
   fix DuckDB's own docs recommend for this pattern.
 - Frontend uses **no browser storage** and plain fetch; keep it dependency-light.
   The editor is a `<textarea>` by design (CodeMirror is a deliberate future step).
+  One narrow exception: `QueryEditor.jsx`'s small-server disclaimer banner
+  (above the Ask AI textarea, warning that this demo runs on a <4GB VPS)
+  dismisses via `sessionStorage`, not `localStorage` — stays dismissed for
+  that browser tab's session, not forever. Don't extend this pattern
+  elsewhere without a similar reason.
 - Backend is storage-agnostic. To go remote, only view registration in
   `engine.py` changes (load `azure`/`httpfs`, register `read_parquet('az://…')`
   or `'s3://…'` globs) — the frontend is untouched.

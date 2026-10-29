@@ -2,11 +2,23 @@ import { useState } from "react";
 import { generateSql } from "../api";
 import ResizableTextarea from "./ResizableTextarea.jsx";
 
+const DISCLAIMER_KEY = "blobquery-server-disclaimer-dismissed";
+
 export default function QueryEditor({ sql, setSql, onRun, status, aiEnabled }) {
   const [mode, setMode] = useState("sql"); // sql | ai
   const [prompt, setPrompt] = useState("");
   const [aiStatus, setAiStatus] = useState("idle"); // idle | running | error
   const [aiError, setAiError] = useState(null);
+  // sessionStorage, not localStorage — dismissed for this browser tab's
+  // session only, not forever. A deliberate, narrow exception to the
+  // no-browser-storage rule (see CLAUDE.md), scoped to one UI dismissal.
+  const [disclaimerDismissed, setDisclaimerDismissed] = useState(
+    () => sessionStorage.getItem(DISCLAIMER_KEY) === "1"
+  );
+  const dismissDisclaimer = () => {
+    sessionStorage.setItem(DISCLAIMER_KEY, "1");
+    setDisclaimerDismissed(true);
+  };
 
   const onKeyDown = (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -69,6 +81,22 @@ export default function QueryEditor({ sql, setSql, onRun, status, aiEnabled }) {
         </>
       ) : (
         <>
+          {!disclaimerDismissed && (
+            <div className="server-disclaimer" role="note">
+              <span className="server-disclaimer-text">
+                This is a demo running on a small server (&lt;4GB RAM) — a heavy query
+                or a large AI-generated join can crash it. Please keep queries reasonable.
+              </span>
+              <button
+                type="button"
+                className="server-disclaimer-dismiss"
+                onClick={dismissDisclaimer}
+                aria-label="Dismiss"
+              >
+                ×
+              </button>
+            </div>
+          )}
           <div className="toolbar">
             <button className="run-btn" onClick={generate} disabled={!aiEnabled || aiStatus === "running"}>
               {aiStatus === "running" ? "Generating…" : "Generate"}
